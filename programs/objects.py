@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import programs.NN as NN
 
 torch.manual_seed(1234)
 
@@ -18,11 +17,11 @@ class Sin(nn.Module):
 
     def forward(self, inp:torch.Tensor) -> torch.Tensor:
         return torch.sin(self.f * inp)
-    
+
 
 class Cos(nn.Module):
     """
-    sin activation function for Neural Network
+    cos activation function for Neural Network
     """
     def __init__(self, f=1.0):
         super().__init__()
@@ -33,27 +32,14 @@ class Cos(nn.Module):
         return torch.cos(self.f * inp)
         
 
-class Wave(nn.Module):
-    """
-    sin+cos activation function for Neural Network
-    """
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, inp):
-        return torch.cos(inp) + torch.sin(inp)
-
-
 class Morlet(nn.Module):
-    """
-    cos(x*7/4)e^(-x^2/2)
-    """
-    def __init__(self):
+    def __init__(self, initial_freq=7/4):
         super().__init__()
+        self.freq = nn.Parameter(torch.tensor(initial_freq))
         self.name = 'Morlet'
     
     def forward(self, inp):
-        c1 = 7/4
+        c1 = torch.nn.functional.softplus(self.freq)
         c2 = -1/2
         return torch.cos(c1*inp)*torch.exp(inp*inp*c2)
 
@@ -141,10 +127,11 @@ class Width():
         self.const_name    = ('w_const',    'wconst',    'const')
         self.sincos_name   = ('w_sincos',   'wsincos',   'sincos')
         self.elliptic_name = ('w_elliptic', 'welliptic', 'elliptic')
+        self.elliptic__name = ('w_elliptic_', 'welliptic_', 'elliptic_')
         self.wave_name     = ('w_wave',     'wwave',     'wave')
         self.sineband_name = ('w_sineband', 'wsineband', 'sineband')
 
-        self.good_names = self.const_name + self.sincos_name + self.elliptic_name + self.wave_name + self.sineband_name
+        self.good_names = self.const_name + self.sincos_name + self.elliptic__name + self.elliptic_name + self.wave_name + self.sineband_name
         
         self.w  = w
         self.w1 = w1
@@ -163,18 +150,24 @@ class Width():
             return self.sincos(x, y)
         elif self.name in self.elliptic_name:
             return self.elliptic(x, y)
+        elif self.name in self.elliptic__name:
+            return self.elliptic(x, y)
         elif self.name in self.wave_name:
             return self.wave(x, y)
         elif self.name in self.sineband_name:
             return self.sineband(x, y)
 
 
-    def const(self, x):          return self.w*torch.ones_like(x)
+    def const_(self, x):       return self.w*torch.ones_like(x)
 
-    def sincos(self, x, y):   return self.w + self.w1 * torch.cos(torch.pi*x) * torch.sin(torch.pi*y)
+    def const(self, x):        return torch.ones_like(x)
+
+    def sincos(self, x, y):    return self.w + self.w1 * torch.cos(torch.pi*x) * torch.sin(torch.pi*y)
     
-    def elliptic(self, x, y): return self.w + self.w1 * ((x / self.w2)**2 + ((y - self.w4) / self.w3)**2)
+    def elliptic_(self, x, y): return self.w + self.w1 * ((x / self.w2)**2 + ((y - self.w4) / self.w3)**2)
+        
+    def elliptic(self, x, y):  return 1 + self.w3/self.w * ((x * self.w1 / 1.5)**2 + ((y - 1/2) * self.w2  / 0.5)**2)
 
-    def wave(self, x, y):     return self.w + self.w1 * torch.sin(torch.pi*(self.w2*x-self.w3*y))
+    def wave(self, x, y):      return self.w + self.w1 * torch.sin(torch.pi*(self.w2*x-self.w3*y))
 
-    def sineband(self, x, y): return self.w + self.w1 * (1 + torch.cos(torch.pi*self.w2*y)) / 2 * (torch.sigmoid(200*(x-self.w3)) - torch.sigmoid(200*(x-self.w4)))
+    def sineband(self, x, y):  return self.w + self.w1 * (1 + torch.cos(torch.pi*self.w2*y)) / 2 * (torch.sigmoid(200*(x-self.w3)) - torch.sigmoid(200*(x-self.w4)))

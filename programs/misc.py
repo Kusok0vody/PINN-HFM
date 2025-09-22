@@ -59,24 +59,25 @@ def derivative(dx, x, order=1)->torch.Tensor:
         Derivative of function.
     """
     for _ in range(order):
-        dx = torch.autograd.grad(outputs=dx, inputs=x, grad_outputs = torch.ones_like(dx), create_graph=True, retain_graph=True)[0]
-
+        dx = torch.autograd.grad(outputs=dx, inputs=x, grad_outputs=torch.ones_like(dx), create_graph=True, retain_graph=True)[0]
     return dx
 
-def psi(y, chi, y_max):
-    """
-    Returns a step function with a value of 1 within a given interval for lists and NumPy arrays.
+# def psi(y, chi, y_max):
+#     """
+#     Returns a step function with a value of 1 within a given interval for lists and NumPy arrays.
 
-    Parameters
-    ----------
-    y : list of array
-        Array of coordinates.
-    chi : float
-        The length of the interval in which the function value is equal to 1.
-    y_max : float
-        Length of the whole interval.
-    """
-    return torch.where((y - y_max / 2).abs().round(decimals=5) <= chi / 2, 1., 0.)
+#     Parameters
+#     ----------
+#     y : list of array
+#         Array of coordinates.
+#     chi : float
+#         The length of the interval in which the function value is equal to 1.
+#     y_max : float
+#         Length of the whole interval.
+#     """
+#     return torch.where((y - y_max / 2).abs().round(decimals=5) <= chi / 2, 1., 0.)
+def psi(y, chi, y_max):
+    return torch.where((y - 1 / 2).abs().round(decimals=5) <= chi / 2 / y_max, 1., 0.)
 
 
 def heaviside(x):
@@ -156,6 +157,10 @@ def viscosity(mu0, c, cmax, beta=-2.5):
         Degree for formula.
     """
     return mu0 * (1 - c / cmax) ** (beta)
+
+
+def norm(f:torch.Tensor):
+    return (f - f.min()) / (f.max() - f.min())
 
 def extremum(x):
     a = x.max()
