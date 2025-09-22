@@ -1,6 +1,6 @@
-import torch # type: ignore
-import torch.nn as nn # type: ignore
-import numpy as np # type: ignore
+import torch
+import torch.nn as nn
+import numpy as np
 
 from collections import OrderedDict
 
@@ -48,7 +48,7 @@ class Net(nn.Module):
         """
         Sets the optimizer for Neural Network
         
-        Types: Adam, LBFGS
+        Types: Adam, NAdam, LBFGS
         """
         if optimizer_type=='Adam':
             return torch.optim.Adam(self.parameters(), lr=lr, weight_decay=1e-5)

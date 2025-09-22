@@ -17,8 +17,8 @@ from programs.NN import *
 class Poisson_Convection:
     def __init__(self,
                  data : dict,
-                 device=0,
-                 net=0,
+                 device : str = 0,
+                 net : Net = 0,
                 ):
 
         # CPU/GPU
@@ -46,7 +46,7 @@ class Poisson_Convection:
             if type(min_data[i])==int and not(type(data[i])==int):
                 raise ValueError(f'Value {data[i]} in {i} must be integer')
 
-        self.update_data(data)
+        self.updateData(data)
 
         # Make a model
         if net==0:
@@ -62,9 +62,9 @@ class Poisson_Convection:
         # Make first arrays of IC, BC
         self.make_distributed_points()
     
-    def update_data(self, data:dict):
+    def updateData(self, data:dict):
         # Training parameters
-        self.crit_func   = torch.nn.MSELoss()
+        self.criterion   = torch.nn.MSELoss()
         self.Adam_epochs = data.setdefault('Adam_epochs', 1000)
         self.lr          = data.setdefault('lr', 1e-5)
         self.epoch       = data.setdefault('epoch', 0)
@@ -106,14 +106,11 @@ class Poisson_Convection:
         self.ratio = data.setdefault('ratio', 100)
         self.t_max = data.get('t_max')
         self.T     = self.kappa * self.ratio
-        self.linear_mult = data.setdefault('linear_mult', 1)
 
         self.beta = data.setdefault('beta', -2.5)
 
         # Initial condition parameters
         self.N_IC      = data.get('N_IC')
-        self.IC_type   = data.setdefault('IC_type', 'zero')
-        self.IC_const  = data.setdefault('IC_const', 0)
         self.band_val  = data.setdefault('band_val', 0.6)
         self.bandshape = data.setdefault('IC_bandshape', [0.2,0.4])
 
@@ -145,87 +142,63 @@ class Poisson_Convection:
         self.NN_params['depth']       = data.get('NN_params', {1:1}).setdefault('depth', 4)
         self.NN_params['act']         = self.act_dict.get(data.setdefault('NN_params', {1:1}).setdefault('act', None))
         
-    def soft_relu(self, x, eps = 0.001): return (x + torch.sqrt(x**2 + eps**2)) / 2
+    def softReLU(self, x, eps = 0.001): return (x + torch.sqrt(x**2 + eps**2)) / 2
     
-    def transform(self, net, coords):
+    def transform(self, pred):
         eps = 0.001
-        X = (net[:, 0] + torch.sqrt(net[:, 0]**2 + eps**2)) / 2
-        new_net = net.clone()
-        new_net[:, 0] = (X + 1 - torch.sqrt((X - 1)**2 + eps**2)) / 2
-        return new_net
+        X = (pred[:, 0] + torch.sqrt(pred[:, 0]**2 + eps**2)) / 2
+        new_pred = pred.clone()
+        new_pred[:, 0] = (X + 1 - torch.sqrt((X - 1)**2 + eps**2)) / 2
+        return new_pred
 
-    def compute_PDE(self, x, y, t, beta=None):
-        
-        if self.NN_params['input_size']==3:
-            prediction_PDE = self.model([x,y,t], self.transform)
-        else:
-            prediction_PDE = self.model([x,y,t,beta], self.transform)
+    def computePDE(self, x, y, t):
+        prediction_PDE = self.model([x,y,t], self.transform)
         
         c   = prediction_PDE[:,0]
         p_x = prediction_PDE[:,1]
         p_y = prediction_PDE[:,2]
         
         width  = self.w_func(x, y)
-        if self.NN_params['input_size']==3:
-            mu = (1.0 - c).pow(self.beta)
-        else:
-            mu = (1 - c).pow(beta)
+        
+        mu = self.viscosity(c)
 
-        c_x = misc.derivative(c, x) * self.soft_relu(-width**2 * p_x / mu)
+        c_x = misc.derivative(c, x) * -width**2 * p_x / mu
         c_y = misc.derivative(c, y) * -width**2 * p_y / mu * self.alpha**2
         c_t = misc.derivative(c, t)
 
-        ux_x = misc.derivative(self.soft_relu(-width**2 * p_x / mu), x)
+        ux_x = misc.derivative(-width**2 * p_x / mu, x)
         uy_y = misc.derivative(-width**2 * p_y / mu, y) * self.alpha**2
         
-        conv = c_t + c_x + c_y
+        convection = c_t + c_x + c_y
         
-        div = ux_x + uy_y
-        corr = misc.derivative(p_x, y) - misc.derivative(p_y, x)
+        poisson = ux_x + uy_y
+        correlation = misc.derivative(p_x, y) - misc.derivative(p_y, x)
         
-        return conv, div, corr
+        return convection, poisson, correlation
     
-    def loss_function(self):
+    def lossFunction(self):
     
         self.optimizer.zero_grad()
         
         # Initial condition
-        loss_IC = 0
-        if self.weights[3]!=0:
-            if self.NN_params['input_size']==3:
-                prediction_IC = self.model([self.x_IC, self.y_IC, self.t_IC], self.transform)[:,0]
-            else:
-                prediction_IC = self.model([self.x_IC, self.y_IC, self.t_IC, self.beta_IC], self.transform)[:,0]
+        loss_IC = 0.0
+        if self.weights[3] != 0.0:
+            prediction_IC = self.model([self.x_IC, self.y_IC, self.t_IC], self.transform)[:,0]
             loss_IC = self.weights[3] * self.criterion(prediction_IC, self.c_IC)
             self.IC.append(loss_IC.item())
         
         # Boundary conditions
-        if self.weights[4]!=0 or self.weights[5]!=0 or self.weights[6]!=0:
+        if self.weights[4] != 0 or self.weights[5] != 0 or self.weights[6] != 0:
             K = self.l(self.N_BC2)
             N = self.N_BC2
-            if self.NN_params['input_size']==3:
-                prediction_BC = self.model([self.x_BC, self.y_BC, self.t_BC], self.transform)
-            else:
-                prediction_BC = self.model([self.x_BC, self.y_BC, self.t_BC, self.beta_BC], self.transform)
-            loss_BC = 0
+            prediction_BC = self.model([self.x_BC, self.y_BC, self.t_BC], self.transform)
+            loss_BC = 0.0
 
-        if self.weights[4]!=0:
+        if self.weights[4] != 0:
             prediction_c = prediction_BC[:,0][self.where_c_in]
-            # prediction_c.register_hook(lambda grad: grad * 100.0)
             loss_BC += self.weights[4] * self.criterion(prediction_c, self.c[self.where_c_in])
-            if self.diff:
-                if self.NN_params['input_size']==3:
-                    c_lr = self.model([self.x_lr, self.y_lr, self.t_lr], self.transform)[:,0]
-                    c_tb = self.model([self.x_tb, self.y_tb, self.t_tb], self.transform)[:,0]
-                else:
-                    c_lr = self.model([self.x_lr, self.y_lr, self.t_lr, self.beta_lr], self.transform)[:,0]
-                    c_tb = self.model([self.x_tb, self.y_tb, self.t_tb, self.beta_tb], self.transform)[:,0]
-                c_x = misc.derivative(c_lr, self.x_lr)
-                c_y = misc.derivative(c_tb, self.y_tb)
-                loss_BC += self.weights[4] * (self.criterion(c_x, torch.zeros_like(c_x)) + self.criterion(c_y, torch.zeros_like(c_y)))
 
-
-        if self.weights[5]!=0:
+        if self.weights[5] != 0:
             prediction_px = prediction_BC[:,1]
             prediction_py = prediction_BC[:,2]
             loss_BC += self.weights[5] * (self.criterion(prediction_py[0*K:1*K], self.p[0*K:1*K]) +
@@ -239,9 +212,9 @@ class Poisson_Convection:
                                           self.criterion(prediction_px[4*K+3*N:4*K+4*N], self.p[4*K+3*N:4*K+4*N])
                                          )                                       
 
-        if self.weights[6]!=0:
+        if self.weights[6] != 0:
             width  = self.w_func(self.x_BC, self.y_BC)
-            mu = (1.0 - prediction_BC[:,0]).pow(self.beta)
+            mu = self.viscosity(prediction_BC[:,0])
             prediction_ux = -width**2 / mu * prediction_BC[:,1] * self.ratio
             prediction_uy = -width**2 / mu * prediction_BC[:,2] * self.ratio
             loss_BC += self.weights[5] * (self.criterion(prediction_uy[0*K:1*K], self.u[0*K:1*K]) +
@@ -254,31 +227,30 @@ class Poisson_Convection:
                                           self.criterion(prediction_ux[4*K+2*N:4*K+3*N], self.u[4*K+2*N:4*K+3*N]) +
                                           self.criterion(prediction_ux[4*K+3*N:4*K+4*N], self.u[4*K+3*N:4*K+4*N])
                                          )
-
+            
         self.BC.append(loss_BC.item())
         
         # PDE
-        if self.weights[0]!=0 or self.weights[1]!=0 or self.weights[2]!=0:
-            if self.NN_params['input_size']==3:
-                conv, div, corr = self.compute_PDE(self.x_PDE, self.y_PDE, self.t_PDE)
-            else:
-                conv, div, corr = self.compute_PDE(self.x_PDE, self.y_PDE, self.t_PDE, self.beta_PDE)
-            loss_conv = self.criterion(conv, torch.zeros_like(conv))
-            loss_div  = self.criterion(div,  torch.zeros_like(div))
-            loss_PDE  = self.weights[0] * loss_conv + self.weights[1] * loss_div
+        if self.weights[0] != 0.0 or self.weights[1] != 0.0 or self.weights[2] != 0.0:
+            conv, div, corr = self.compute_PDE(self.x_PDE, self.y_PDE, self.t_PDE)
+
+            loss_PDE  = (
+                self.weights[0] * self.criterion(conv, torch.zeros_like(conv)) +
+                self.weights[1] * self.criterion(div,  torch.zeros_like(div))
+            )
+            
             loss_corr = self.weights[2] * self.criterion(corr, torch.zeros_like(corr))
-            # loss_conv += dQ
 
             self.PDE.append(loss_PDE.item())
             self.corr.append(loss_corr.item())
 
-        if self.dataloss:
+        loss_data = 0.0
+        if self.weights[7] != 0.0:
             pred_data = self.model([self.x_data, self.y_data, self.t_data], self.transform)[:,0]
             loss_data = self.weights[7] * self.criterion(pred_data, self.calculated_data)
             self.data.append(loss_data.item())
         
-        if self.dataloss: losses = torch.stack([loss_PDE, loss_IC, loss_BC, loss_corr, loss_data]).to(self.device)
-        else: losses = torch.stack([loss_PDE, loss_IC, loss_BC, loss_corr]).to(self.device) 
+        losses = torch.stack([loss_PDE, loss_IC, loss_BC, loss_corr, loss_data]).to(self.device) 
 
         loss = torch.sum(losses)
         loss.backward()
@@ -286,13 +258,15 @@ class Poisson_Convection:
 
         if self.epoch % self.k == 0:
             self.end = time.time()
-            self.print_tab.add_rows([['|', f'{self.epoch}\t',             '|',
-                                    f'{round(loss_PDE.item(),  7)}\t',    '|',
-                                    f'{round(loss_corr.item(), 7)}\t',    '|',
-                                    f'{round(loss_IC.item(),   7)}\t',    '|',
-                                    f'{round(loss_BC.item(),   7)}\t',    '|',
-                                    f'{round(self.losses[-1],  7)}\t',    '|',
-                                    f'{round(self.end - self.start, 4)}', '|']])
+            self.print_tab.add_rows([['|',
+                                    f'{self.epoch}\t',               '|',
+                                    f'{loss_PDE.item():2.5f}\t',     '|',
+                                    f'{loss_corr.item():2.5f}\t',    '|',
+                                    f'{loss_IC.item():2.5f}\t',      '|',
+                                    f'{loss_BC.item():2.5f}\t',      '|',
+                                    f'{self.losses[-1]:2.5f}\t',     '|',
+                                    f'{self.end - self.start:1.6f}', '|'
+                                    ]])
             print(self.print_tab.draw())
             self.start = time.time()
         self.epoch += 1
@@ -302,7 +276,7 @@ class Poisson_Convection:
         self.print_tab = Texttable()
         self.print_tab.set_deco(Texttable.HEADER)
         self.print_tab.set_cols_width([1,10,1,15,1,15,1,15,1,15,1,15,1,10,1])
-        self.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','p corr loss','|','IC loss','|','BC loss','|','Summary loss','|','time','|']])
+        self.print_tab.add_rows([['|','Epoch','|', 'PDE loss','|','p corr loss','|','IC loss','|','BC loss','|','Summary loss','|','time','|']])
         print(self.print_tab.draw())
 
         self.model.train()
@@ -310,63 +284,12 @@ class Poisson_Convection:
         for _ in range(self.max_iter):
             self.optimizer = self.model.set_optimizer('NAdam', lr=self.lr)
             while self.epoch < self.Adam_epochs:
-                self.optimizer.step(self.loss_function)
+                self.optimizer.step(self.lossFunction)
             self.optimizer = self.model.set_optimizer('LBFGS', max_iter=self.max_epoch)
-            self.optimizer.step(self.loss_function)
+            self.optimizer.step(self.lossFunction)
             if self.save_after:
                 self.save(self.path)
 
-    @staticmethod
-    def HPO(data, true, conv, div, corr, IC, c_BC, p_BC, ratio, max_epoch=20000):
-        # data['NN_params']['neurons_arr'] = [int(neurons)]*(int(depth)+2)
-        # data['NN_params']['depth'] = int(depth)
-        data['weights'] = [float(conv), float(div), float(corr), float(IC), float(c_BC), float(p_BC), 0, 0]
-        # data['N_PDE'] = int(PDE_points)
-        # data['N_IC']  = int(IC_points)
-        # data['N_BC']  = int(BC_points)
-        data['ratio'] = float(ratio)
-
-        try: del instance
-        except: pass
-        
-        instance = Poisson_Convection(data)
-        instance.model.apply(Net.init_weights)
-
-        print(f"neurons:{data['NN_params']['neurons_arr']}, depth:{data['NN_params']['depth']},\nweigths:{instance.weights},\npoints:{instance.N_PDE},{instance.N_IC},{instance.N_BC}, ratio:{instance.ratio}")
-        
-        instance.print_tab = Texttable()
-        instance.print_tab.set_deco(Texttable.HEADER)
-        instance.print_tab.set_cols_width([1,10,1,15,1,15,1,15,1,15,1,15,1,10,1])
-        instance.print_tab.add_rows([['|','Epochs','|', 'PDE loss','|','data loss','|','IC loss','|','BC loss','|','Summary loss','|','time','|']])
-        print(instance.print_tab.draw())
-        instance.model.train()
-        
-        instance.epoch = 0
-        instance.optimizer = instance.model.set_optimizer('NAdam', lr=instance.lr)
-        while instance.epoch <= instance.Adam_epochs+1:
-            instance.optimizer.step(instance.loss_function)
-        instance.optimizer = instance.model.set_optimizer('LBFGS', max_epoch - instance.Adam_epochs)
-        instance.optimizer.step(instance.loss_function)
-
-        
-        Ny, Nx = true.shape
-
-        x_Tensor = torch.linspace(0, 1, Nx)
-        y_Tensor = torch.linspace(0, 1, Ny)
-        t_Tensor = torch.Tensor([instance.t_max*instance.T]).to(instance.device)
-
-        mesh_XY = torch.stack(torch.meshgrid(x_Tensor,y_Tensor,t_Tensor, indexing='ij')).reshape(3, -1).T
-        mesh_X = mesh_XY[:,0]
-        mesh_Y = mesh_XY[:,1]
-        mesh_T = mesh_XY[:,2]
-
-        X = torch.autograd.Variable(mesh_X, requires_grad=True)
-        Y = torch.autograd.Variable(mesh_Y, requires_grad=True)
-        T = torch.autograd.Variable(mesh_T, requires_grad=True)
-
-        pred = instance.get_c(X,Y,T).reshape(Nx, Ny).transpose(1,0)
-
-        return np.sum(np.abs(true - pred)), instance
 
     @staticmethod
     def load(path, loadloss=True, device='cpu'):
@@ -380,7 +303,7 @@ class Poisson_Convection:
         instance = Poisson_Convection(data, device, torch.load(path+'.pt', map_location=device, weights_only=False))
         return instance
     
-    def update_from_file(self, path, loadloss=True, device='cpu'):
+    def updateFromFile(self, path, loadloss=True, device='cpu'):
         with open(path+'.json') as data_file:
             data = json.load(data_file)
         if loadloss:
@@ -425,8 +348,6 @@ class Poisson_Convection:
                 'ratio'       : self.ratio,
 
                 'N_IC'        : self.N_IC,
-                'IC_type'     : self.IC_type,
-                'IC_const'    : self.IC_const,
 
                 'band_val'    : self.band_val,
                 'bandshape'   : self.bandshape,
@@ -466,15 +387,14 @@ class Poisson_Convection:
         
         torch.save(self.model, path+'.pt')
         self.NN_params['act'] = self.act_dict.get(self.NN_params['act'])
-    
-    def criterion(self, pred, true): return self.crit_func(pred, true)
 
-    def psi(self, y): return torch.where((y - 1 / 2).abs().round(decimals=5) <= self.zeta / 2, 1., 0.)
+    def psi(self, y):
+        return torch.where((y - 1 / 2).abs().round(decimals=5) <= self.zeta / 2, 1., 0.)
 
-    def viscosity(self, c, beta): return (1 - c)**beta
+    def viscosity(self, c):
+        return (1 - c) ** self.beta
 
-    def Boundary_conditions(self, x, y, t, beta):
-        
+    def boundaryConditions(self, x, y, t):
         with torch.no_grad():
             c = torch.zeros(len(x))
             p = torch.zeros(len(x))
@@ -484,10 +404,10 @@ class Poisson_Convection:
             left_side  = torch.where(x==0, 1, 0)
             right_side = torch.where(x==1, 1, 0)   
 
-            times = [0] + [self.T*times for times in self.times] + [self.T*self.t_max]
+            times = [0.0] + [self.T*times for times in self.times] + [self.T*self.t_max]
             for i in range(len(times)-1):
-                time_start = torch.where(t>=times[i], 1., 0.)
-                time_end   = torch.where(t<=times[i+1], 1., 0.)
+                time_start = torch.where(t>=times[i], 1.0, 0.0)
+                time_end   = torch.where(t<=times[i+1], 1.0, 0.0)
                 c = torch.where(time_start + 
                                 time_end   +
                                 left_side  +
@@ -498,13 +418,13 @@ class Poisson_Convection:
                                 time_end   + 
                                 left_side  + 
                                 psi     == 4,
-                                -self.viscosity(self.c_cond[i], beta), p) 
+                                -self.viscosity(self.c_cond[i]), p) 
                 
                 u = torch.where(time_start + 
                                 time_end   +
                                 left_side  +
                                 psi     == 4,
-                                1., u)
+                                1.0, u)
             
             w_right = (self.psi(y[x==0]) * self.w_func(self.zeros, y[x==0])).sum() / (torch.ones_like(y[x==1]) * self.w_func(self.ones, y[x==1])).sum()
             p  = torch.where(right_side==1, -w_right, p)
@@ -514,52 +434,45 @@ class Poisson_Convection:
                              w_right, u)
             return c, p, u
     
-    def Initial_conditions(self, x, y):
-        if self.IC_type=='square':
-            self.c_IC = self.IC_const*misc.psi(x, self.band_val, self.size[1])*misc.psi(y, self.band_val, self.size[3])
-        else:
-            self.c_IC = self.IC_const*torch.ones_like(x)     
-        self.c_IC += self.c_cond[0] * self.psi(y) * torch.where(x==0, 1, 0)
+    def initialConditions(self, x, y):
+        self.c_IC = self.c_cond[0] * self.psi(y) * torch.where(x==0, 1, 0)
         
-    def make_BC_dist(self, dist, xy, t):
+    def makeBC(self, dist, xy, t):
         if (dist.sum()==0).item(): dist = torch.ones_like(dist)
         sampled_indices = torch.multinomial(dist/dist.sum(), self.N_BC2, replacement=True)
         xy = torch.index_select(xy, -1, sampled_indices)
         t  = torch.index_select(t,  -1, sampled_indices)
         return xy, t
 
-    def generate_linear_points(self, num_points, ranges):
+    def generateLinearPoints(self, num_points, ranges):
         grids = [torch.linspace(r[0], r[1], num_points).to(self.device) for r in ranges]
         return torch.stack(torch.meshgrid(*grids, indexing='ij')).reshape(len(ranges), -1)
 
-    def generate_random_points(self, num_points, ranges):
-        # grids = [torch.Tensor(num_points).to(self.device).uniform_(r[0], r[1]) for r in ranges]
-        # return torch.stack(torch.meshgrid(*grids, indexing='ij')).reshape(len(ranges), -1)
+    def generateRandomPoints(self, num_points, ranges):
         grids = [torch.Tensor(num_points**(len(ranges))).to(self.device).uniform_(r[0], r[1]) for r in ranges]
         return torch.stack(grids).reshape(len(ranges), -1)
-        
-    def l(self, N): return int(self.linear_mult*N)
     
     def make_distributed_points(self):
         x_range = [0, 1]
         y_range = [0, 1]
         t_range = [0, self.T*self.t_max]
         
+        # -------------------------
         # --- Initial Condition ---
-        with torch.no_grad():
-            x_linear, y_linear = self.generate_linear_points(self.l(self.N_IC), [x_range, y_range])
-            x_random, y_random = self.generate_random_points(self.N_IC, [x_range, y_range])
+        # -------------------------
+        x_linear, y_linear = self.generateLinearPoints(self.N_IC, [x_range, y_range])
+        x_random, y_random = self.generateRandomPoints(self.N_IC, [x_range, y_range])
             
         self.x_IC = Variable(torch.cat((x_linear, x_random)), requires_grad=True).to(self.device)
         self.y_IC = Variable(torch.cat((y_linear, y_random)), requires_grad=True).to(self.device)
         self.t_IC = Variable(torch.zeros_like(self.x_IC), requires_grad=True).to(self.device)
-        if self.NN_params['input_size']!=3:
-            self.beta_IC = Variable(self.beta * torch.ones_like(self.x_IC), requires_grad=True).to(self.device)
-        self.Initial_conditions(self.x_IC, self.y_IC)
+        self.InitialConditions(self.x_IC, self.y_IC)
         
+        # ------------------
         # --- PDE Points ---
-        x_linear, y_linear, t_linear = self.generate_linear_points(self.l(self.N_PDE), [x_range, y_range, t_range])
-        x_random, y_random, t_random = self.generate_random_points(self.N_PDE, [x_range, y_range, t_range])
+        # ------------------
+        x_linear, y_linear, t_linear = self.generateLinearPoints(self.l(self.N_PDE), [x_range, y_range, t_range])
+        x_random, y_random, t_random = self.generateRandomPoints(self.N_PDE, [x_range, y_range, t_range])
 
         try:
             self.x_PDE
@@ -572,11 +485,7 @@ class Poisson_Convection:
         x = Variable(torch.cat((x_random, self.x_PDE[self.N_PDE**3:])), requires_grad=True).to(self.device)
         y = Variable(torch.cat((y_random, self.y_PDE[self.N_PDE**3:])), requires_grad=True).to(self.device)
         t = Variable(torch.cat((t_random, self.t_PDE[self.N_PDE**3:])), requires_grad=True).to(self.device)
-        if self.NN_params['input_size']==3:
-            conv, div, corr = self.compute_PDE(x, y, t)
-        else:
-            beta = Variable(self.beta*torch.ones_like(x), requires_grad=True).to(self.device)
-            conv, div, corr = self.compute_PDE(x, y, t, beta)
+        conv, div, corr = self.compute_PDE(x, y, t)
         
         pde_dist = self.weights[0] * torch.where(conv.abs()>0.01, 1, 0)+ self.weights[1] * torch.where(div.abs()>0.01, 1, 0) + self.weights[2] * torch.where(corr.abs()>0.01, 1, 0)
         # pde_dist = self.weights[0] * conv.abs() + self.weights[1] * div.abs() + self.weights[2] * corr.abs()
@@ -585,10 +494,10 @@ class Poisson_Convection:
         self.x_PDE = Variable(torch.cat((x_linear, x[sampled_indices_pde])), requires_grad=True)
         self.y_PDE = Variable(torch.cat((y_linear, y[sampled_indices_pde])), requires_grad=True)
         self.t_PDE = Variable(torch.cat((t_linear, t[sampled_indices_pde])), requires_grad=True)
-        if self.NN_params['input_size']!=3:
-            self.beta_PDE = Variable(self.beta * torch.ones_like(self.x_PDE), requires_grad=True).to(self.device)
 
-        #  --- Boundary Conditions ---
+        # ---------------------------
+        # --- Boundary Conditions ---
+        # ---------------------------
         with torch.no_grad():
             x = torch.linspace(0, 1, self.N_BC).to(self.device)
             y = torch.linspace(0, 1, self.N_BC).to(self.device)
@@ -604,32 +513,16 @@ class Poisson_Convection:
             self.y_BC = Variable(torch.cat((c_condition_linear[:,1], c_condition_random[:,1])), requires_grad=True)
             self.t_BC = Variable(torch.cat((c_condition_linear[:,2], c_condition_random[:,2])), requires_grad=True)
             
-            if self.NN_params['input_size']==3:
-                self.c, self.p, self.u = self.Boundary_conditions(self.x_BC, self.y_BC, self.t_BC, self.beta)
-            else:
-                self.beta_BC = Variable(self.beta*torch.ones_like(self.x_BC), requires_grad=True)
-                self.c, self.p, self.u = self.Boundary_conditions(self.x_BC, self.y_BC, self.t_BC, self.beta_BC)
+            self.c, self.p, self.u = self.boundaryConditions(self.x_BC, self.y_BC, self.t_BC)
             
             self.where_c_tb  = (self.y_BC==1) | (self.y_BC==0)
             self.where_c_in  = (self.x_BC==0) & ((self.y_BC - 1 / 2).abs().round(decimals=5) <= self.zeta / 2)
             self.where_c_out = (self.x_BC==0) & ((self.y_BC - 1 / 2).abs().round(decimals=5) >  self.zeta / 2)
 
-            self.x_lr = Variable(self.x_BC[self.where_c_out], requires_grad=True).to(self.device)
-            self.y_lr = Variable(self.y_BC[self.where_c_out], requires_grad=True).to(self.device)
-            self.t_lr = Variable(self.t_BC[self.where_c_out], requires_grad=True).to(self.device)
-
-            self.x_tb = Variable(self.x_BC[self.where_c_tb], requires_grad=True).to(self.device)
-            self.y_tb = Variable(self.y_BC[self.where_c_tb], requires_grad=True).to(self.device)
-            self.t_tb = Variable(self.t_BC[self.where_c_tb], requires_grad=True).to(self.device)
-
-            if self.NN_params['input_size']!=3:
-                self.beta_lr = Variable(self.beta*torch.ones_like(self.x_lr), requires_grad=True)
-                self.beta_tb = Variable(self.beta*torch.ones_like(self.x_tb), requires_grad=True)
-
     def __str__(self):
         print_tab = Texttable() 
-        print_tab.set_cols_align(["l", "l", "l", "l"]) 
-        print_tab.set_cols_valign(["m", "m", "m", "m"]) 
+        print_tab.set_cols_align(["l", "l", "l", "l"])
+        print_tab.set_cols_valign(["m", "m", "m", "m"])
 
         print_tab.set_precision(0)
         print_tab.set_cols_dtype(["t", "i", "t", "e"]) 
@@ -664,101 +557,74 @@ class Poisson_Convection:
         
         return print_tab.draw() 
 
-    def eval(self):self.model.eval()
+    def eval(self) : self.model.eval()
 
     def convert(self, x,y,t):
         t = t * self.T
         return x,y,t
 
-    def get_c(self, x, y, t, beta=None):
+    def get_c(self, x, y, t):
         x, y, t = self.convert(x,y,t)
         with torch.no_grad():
-            if self.NN_params['input_size']==3:
-                c = self.model([x,y,t], self.transform)[:,0]
-            else:
-                c = self.model([x,y,t,beta], self.transform)[:,0]
+            c = self.model([x,y,t], self.transform)[:,0]
             return c.data.cpu().numpy()
 
-    def get_px(self, x, y, t, beta=None):
+    def get_px(self, x, y, t):
         x, y, t = self.convert(x,y,t)
         with torch.no_grad():
-            if self.NN_params['input_size']==3:
-                px = self.model([x,y,t], self.transform)[:,1] * self.ratio
-            else:
-                px = self.model([x,y,t,beta], self.transform)[:,1] * self.ratio
+            px = self.model([x,y,t], self.transform)[:,1] * self.ratio
             return px.data.cpu().numpy()
 
-    def get_py(self, x, y, t, beta=None):
+    def get_py(self, x, y, t):
         x, y, t = self.convert(x,y,t)
         with torch.no_grad():
-            if self.NN_params['input_size']==3:
-                py = self.model([x,y,t], self.transform)[:,2] * self.ratio
-            else:
-                py = self.model([x,y,t,beta], self.transform)[:,2] * self.ratio
+            py = self.model([x,y,t], self.transform)[:,2] * self.ratio
             return py.data.cpu().numpy()
 
-    def get_ux(self, x, y, t, beta=None):
+    def get_ux(self, x, y, t):
         x, y, t = self.convert(x,y,t)
         with torch.no_grad():
-            if self.NN_params['input_size']==3:
-                pred = self.model([x,y,t], self.transform)
-            else:
-                pred = self.model([x,y,t,beta], self.transform)
+            pred = self.model([x,y,t], self.transform)
             mu = (1 - pred[:,0])**(self.beta)
             ux = -pred[:,1] * self.w_func(x,y)**2 * self.ratio / mu
             return ux.data.cpu().numpy()
 
-    def get_uy(self, x, y, t, beta=None):
+    def get_uy(self, x, y, t):
         x, y, t = self.convert(x,y,t)
         with torch.no_grad():
-            if self.NN_params['input_size']==3:
-                pred = self.model([x,y,t], self.transform)
-            else:
-                pred = self.model([x,y,t,beta], self.transform)
+            pred = self.model([x,y,t], self.transform)
             mu = (1 - pred[:,0])**(self.beta)
             uy = -pred[:,2] * self.w_func(x,y)**2 * self.ratio / mu
             return uy.data.cpu().numpy()
     
-    def get_mu(self, x, y, t, beta=None):
+    def get_mu(self, x, y, t):
         x, y, t = self.convert(x,y,t)
         with torch.no_grad():
-            if self.NN_params['input_size']==3:
-                mu = (1 - self.model([x,y,t], self.transform)[:,0])**(self.beta)
-            else:
-                mu = (1 - self.model([x,y,t,beta], self.transform)[:,0])**(self.beta)
+            mu = self.viscosity(self.model([x,y,t], self.transform)[:,0])
             return mu.data.cpu().numpy()
 
-    def get_conv(self, x, y, t, beta=None):
+    def get_conv(self, x, y, t):
         x, y, t = self.convert(x,y,t)
-        if self.NN_params['input_size']==3:
-            pred = self.model([x,y,t], self.transform)
-        else:
-            pred = self.model([x,y,t,beta], self.transform)
-        mu = (1 - self.model([x,y,t], self.transform)[:,0])**(self.beta)
+        pred = self.model([x,y,t], self.transform)
+        mu = self.viscosity(pred[:,0])
         с_t = misc.derivative(pred[:,0], t)
         c_x = self.w_func(x,y)**2 / mu * pred[:,1] * misc.derivative(pred[:,0], x)
         c_y = self.w_func(x,y)**2 / mu * pred[:,2] * misc.derivative(pred[:,0], y) * self.alpha**2
         conv =  с_t - c_x - c_y
         return conv.data.cpu().numpy()
 
-    def get_div(self, x, y, t, beta=None):
+    def get_div(self, x, y, t):
         x, y, t = self.convert(x,y,t)
-        if self.NN_params['input_size']==3:
-            pred = self.model([x,y,t], self.transform)
-        else:
-            pred = self.model([x,y,t,beta], self.transform)
-        mu = (1 - self.model([x,y,t], self.transform)[:,0])**(self.beta) 
+        pred = self.model([x,y,t], self.transform)
+        mu = self.viscosity(pred[:,0])
         ux = pred[:,1] * self.w_func(x,y)**2 / mu
         uy = pred[:,2] * self.w_func(x,y)**2 / mu
         div = misc.derivative(ux,x) + misc.derivative(uy,y)
         return div.data.cpu().numpy()
         
-    def get_corr(self, x, y, t, beta=None):
+    def get_corr(self, x, y, t):
         x, y, t = self.convert(x,y,t)
-        if self.NN_params['input_size']==3:
-            pred = self.model([x,y,t], self.transform)
-        else:
-            pred = self.model([x,y,t,beta], self.transform)
+        pred = self.model([x,y,t], self.transform)
         pxy = misc.derivative(pred[:,1],y)
         pyx = misc.derivative(pred[:,2],x)
         corr = pxy - pyx
