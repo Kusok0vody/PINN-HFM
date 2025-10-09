@@ -40,7 +40,7 @@ class Net(nn.Module):
         inputs_united = torch.cat([input_tensor.reshape(-1, 1) for input_tensor in inputs], axis=1)
         outputs = self.layers(inputs_united)
         if transform_func!=None:
-            outputs = transform_func(outputs, inputs)
+            outputs = transform_func(outputs)
         return outputs
 
 

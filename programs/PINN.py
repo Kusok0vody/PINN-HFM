@@ -7,11 +7,70 @@ import os
 from torch.autograd import Variable
 from texttable import Texttable
 from datetime import datetime
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 import programs.conditions as cnd
 import programs.misc as misc
 import programs.objects as obj 
 from programs.NN import *
+
+
+
+class NumericalDataset(Dataset):
+    def __init__(self, Nx, Ny, Nt, T, path, dtype):
+        super().__init__()
+        self.Nx = Nx
+        self.Ny = Ny
+        self.Nt = Nt
+        
+        print(self.Nx, self.Ny, self.Nt)
+        
+        self.dtype  = dtype
+        self.path   = path
+        
+        x = torch.linspace(0, 1, Nx, dtype=torch.float32)
+        y = torch.linspace(0, 1, Ny, dtype=torch.float32)
+        t = torch.linspace(0, T, Nt, dtype=torch.float32)
+
+        coords = torch.stack(torch.meshgrid(t, x, y, indexing='ij')).reshape(3, -1)
+        self.t = coords[0]
+        self.x = coords[1]
+        self.y = coords[2]
+        
+        self.data = {"p": [], "c": [], "u_x": [], "u_y": []}
+        self.loadToMemory()
+
+    def read_data(self, valType, path):
+        path_ = os.path.join(path, valType + ".bin")        
+        with open(path_, "rb") as f:
+            res =  np.frombuffer(f.read(), dtype=self.dtype).reshape(self.Nt, self.Ny, self.Nx)
+        res = np.transpose(res, (0, 2, 1)).reshape(-1)
+        return torch.as_tensor(res, dtype=torch.float32)
+
+    def loadToMemory(self):
+        # types = ("p", "c", "u_x", "u_y")
+        # types = ("p", "c")
+        self.data["p"] = self.read_data("p", self.path)
+        self.data["c"] = self.read_data("c", self.path) / 0.65
+            
+
+    def clear(self):
+        self.data = {"p": [], "c": [], "u_x": [], "u_y": []}
+    
+    def __len__(self):
+        return self.Nt * self.Nx * self.Ny
+    
+    def __getitem__(self, idx):
+        return {
+            "t": self.t[idx],
+            "x": self.x[idx],
+            "y": self.y[idx],
+            "c": self.data["c"][idx],
+            # "ux": self.data["u_x"][idx],
+            # "uy": self.data["u_y"][idx],
+        }
 
 
 class Poisson_Convection:
@@ -123,6 +182,14 @@ class Poisson_Convection:
 
         # PDE parameters
         self.N_PDE = data.get('N_PDE')
+        
+        # Data parameters
+        self.data_path = data.get("data_path")
+        self.data_shape = data.get("data_shape", [101, 101, 101])
+        self.dataset = NumericalDataset(self.data_shape[0], self.data_shape[1], self.data_shape[2], self.T, self.data_path, np.float64)
+        g = torch.Generator(device='cpu')
+        self.batch_size = data.setdefault("batch_size", 16384)
+        self.loader = DataLoader(self.dataset, batch_size=self.batch_size)
 
         # Crack width parameters
         self._w  = data.get('w')
@@ -181,18 +248,18 @@ class Poisson_Convection:
         self.optimizer.zero_grad()
         
         # Initial condition
-        loss_IC = 0.0
+        loss_IC = torch.tensor(0.0).to(self.device)
         if self.weights[3] != 0.0:
             prediction_IC = self.model([self.x_IC, self.y_IC, self.t_IC], self.transform)[:,0]
-            loss_IC = self.weights[3] * self.criterion(prediction_IC, self.c_IC)
+            loss_IC += self.weights[3] * self.criterion(prediction_IC, self.c_IC)
             self.IC.append(loss_IC.item())
         
         # Boundary conditions
+        loss_BC = torch.tensor(0.0).to(self.device)
         if self.weights[4] != 0 or self.weights[5] != 0 or self.weights[6] != 0:
-            K = self.l(self.N_BC2)
+            K = self.N_BC2
             N = self.N_BC2
             prediction_BC = self.model([self.x_BC, self.y_BC, self.t_BC], self.transform)
-            loss_BC = 0.0
 
         if self.weights[4] != 0:
             prediction_c = prediction_BC[:,0][self.where_c_in]
@@ -231,30 +298,51 @@ class Poisson_Convection:
         self.BC.append(loss_BC.item())
         
         # PDE
+        loss_PDE  = torch.tensor(0.0).to(self.device)
+        loss_corr = torch.tensor(0.0).to(self.device)
         if self.weights[0] != 0.0 or self.weights[1] != 0.0 or self.weights[2] != 0.0:
-            conv, div, corr = self.compute_PDE(self.x_PDE, self.y_PDE, self.t_PDE)
+            conv, div, corr = self.computePDE(self.x_PDE, self.y_PDE, self.t_PDE)
 
-            loss_PDE  = (
+            loss_PDE += (
                 self.weights[0] * self.criterion(conv, torch.zeros_like(conv)) +
                 self.weights[1] * self.criterion(div,  torch.zeros_like(div))
             )
             
-            loss_corr = self.weights[2] * self.criterion(corr, torch.zeros_like(corr))
+            loss_corr += self.weights[2] * self.criterion(corr, torch.zeros_like(corr))
 
             self.PDE.append(loss_PDE.item())
             self.corr.append(loss_corr.item())
-
-        loss_data = 0.0
-        if self.weights[7] != 0.0:
-            pred_data = self.model([self.x_data, self.y_data, self.t_data], self.transform)[:,0]
-            loss_data = self.weights[7] * self.criterion(pred_data, self.calculated_data)
-            self.data.append(loss_data.item())
         
-        losses = torch.stack([loss_PDE, loss_IC, loss_BC, loss_corr, loss_data]).to(self.device) 
+        losses = torch.stack([loss_PDE, loss_IC, loss_BC, loss_corr]).to(self.device) 
 
         loss = torch.sum(losses)
         loss.backward()
-        self.losses.append(loss.item())
+        
+        loss_data = torch.tensor(0.0).to(self.device)
+        if self.weights[7] != 0.0:
+            total_samples = 0
+            for batch in self.loader:
+                x_data = batch["x"].to(self.device)
+                y_data = batch["y"].to(self.device)
+                t_data = batch["t"].to(self.device)
+                c_true = batch["c"].to(self.device)
+                
+                batch_size = x_data.shape[0]
+                
+                c_pred = self.model([x_data, y_data, t_data], self.transform)[:,0]
+                loss_batch = self.weights[7] * self.criterion(c_pred, c_true)
+                loss_batch.backward(retain_graph=False)
+                loss_data += loss_batch.item() * batch_size
+                total_samples += batch_size
+
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    p.grad /= total_samples
+            loss_data /= total_samples
+
+        torch.cuda.empty_cache()
+
+        self.losses.append(loss.item() + loss_data.item())
 
         if self.epoch % self.k == 0:
             self.end = time.time()
@@ -264,6 +352,7 @@ class Poisson_Convection:
                                     f'{loss_corr.item():2.5f}\t',    '|',
                                     f'{loss_IC.item():2.5f}\t',      '|',
                                     f'{loss_BC.item():2.5f}\t',      '|',
+                                    f'{loss_data.item():2.5f}\t',    '|',
                                     f'{self.losses[-1]:2.5f}\t',     '|',
                                     f'{self.end - self.start:1.6f}', '|'
                                     ]])
@@ -275,8 +364,8 @@ class Poisson_Convection:
     def train(self):
         self.print_tab = Texttable()
         self.print_tab.set_deco(Texttable.HEADER)
-        self.print_tab.set_cols_width([1,10,1,15,1,15,1,15,1,15,1,15,1,10,1])
-        self.print_tab.add_rows([['|','Epoch','|', 'PDE loss','|','p corr loss','|','IC loss','|','BC loss','|','Summary loss','|','time','|']])
+        self.print_tab.set_cols_width([1,10,1,15,1,15,1,15,1,15,1,15,1,15,1,10,1])
+        self.print_tab.add_rows([['|','Epoch','|', 'PDE loss','|','p corr loss','|','IC loss','|','BC loss','|','Data loss','|','Summary loss','|','time','|']])
         print(self.print_tab.draw())
 
         self.model.train()
@@ -310,7 +399,7 @@ class Poisson_Convection:
             with open(path+'_loss.json') as data_file:
                 data_loss = json.load(data_file)
             data = {**data, **data_loss}
-        self.update_data(data)
+        self.updateData(data)
         self.model = torch.load(path+'.pt', map_location=device, weights_only=False)
         self.make_distributed_points()
 
@@ -355,6 +444,9 @@ class Poisson_Convection:
                 'c_cond'      : self.c_cond,
 
                 'N_PDE'       : self.N_PDE,
+                
+                'data_path'   : self.data_path,
+                'data_shape'  : self.data_shape,
 
                 'w1'          : self.w1,
                 'w2'          : self.w2,
@@ -402,7 +494,7 @@ class Poisson_Convection:
 
             psi        = self.psi(y)
             left_side  = torch.where(x==0, 1, 0)
-            right_side = torch.where(x==1, 1, 0)   
+            right_side = torch.where(x==1, 1, 0)
 
             times = [0.0] + [self.T*times for times in self.times] + [self.T*self.t_max]
             for i in range(len(times)-1):
@@ -466,12 +558,12 @@ class Poisson_Convection:
         self.x_IC = Variable(torch.cat((x_linear, x_random)), requires_grad=True).to(self.device)
         self.y_IC = Variable(torch.cat((y_linear, y_random)), requires_grad=True).to(self.device)
         self.t_IC = Variable(torch.zeros_like(self.x_IC), requires_grad=True).to(self.device)
-        self.InitialConditions(self.x_IC, self.y_IC)
+        self.initialConditions(self.x_IC, self.y_IC)
         
         # ------------------
         # --- PDE Points ---
         # ------------------
-        x_linear, y_linear, t_linear = self.generateLinearPoints(self.l(self.N_PDE), [x_range, y_range, t_range])
+        x_linear, y_linear, t_linear = self.generateLinearPoints(self.N_PDE, [x_range, y_range, t_range])
         x_random, y_random, t_random = self.generateRandomPoints(self.N_PDE, [x_range, y_range, t_range])
 
         try:
@@ -485,7 +577,7 @@ class Poisson_Convection:
         x = Variable(torch.cat((x_random, self.x_PDE[self.N_PDE**3:])), requires_grad=True).to(self.device)
         y = Variable(torch.cat((y_random, self.y_PDE[self.N_PDE**3:])), requires_grad=True).to(self.device)
         t = Variable(torch.cat((t_random, self.t_PDE[self.N_PDE**3:])), requires_grad=True).to(self.device)
-        conv, div, corr = self.compute_PDE(x, y, t)
+        conv, div, corr = self.computePDE(x, y, t)
         
         pde_dist = self.weights[0] * torch.where(conv.abs()>0.01, 1, 0)+ self.weights[1] * torch.where(div.abs()>0.01, 1, 0) + self.weights[2] * torch.where(corr.abs()>0.01, 1, 0)
         # pde_dist = self.weights[0] * conv.abs() + self.weights[1] * div.abs() + self.weights[2] * corr.abs()
