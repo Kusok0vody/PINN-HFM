@@ -51,7 +51,7 @@ class proppantDynamics_dless(Physics):
             if "bc" in bound
         }
         self.initial    = initial or {
-            "c": {"type": "dirichlet", "value": lambda x, y: torch.zeros_like(x)}
+            "c": lambda x, y: torch.zeros_like(x)
         }
         self.transforms = {
             "c": lambda c: smooth_clamp(c, lo=0.0, hi=1.0, eps=1e-16),

@@ -164,7 +164,7 @@ class Sampler:
 
     def _sample_one_boundary(self, name: str, bound: dict) -> BoundaryBatch:
         geo   = self.geometry
-        n     = self.n_boundary
+        n   = bound.get("N", self.n_boundary)
         p_min, p_max = bound["p"]
 
         if n == 0:
