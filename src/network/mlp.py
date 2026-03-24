@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 
-from activations import Sine, Morlet, MexicanHat
+from src.network.activations import Sine, Morlet, MexicanHat
 
 
 _KAIMING_ACTIVATIONS = (nn.ReLU, nn.LeakyReLU, nn.ELU, nn.GELU, nn.SiLU)

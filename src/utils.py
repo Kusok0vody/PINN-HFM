@@ -80,3 +80,10 @@ def unpack_coords(coords: torch.Tensor, has_time: bool, dim: int) -> dict:
         name: coords[:, i:i+1]
         for i, name in enumerate(order)
     }
+    
+def unpack_coords_grad(coords: torch.Tensor, has_time: bool, dim: int) -> dict:
+    order = COORD_ORDER[(has_time, dim)]
+    return {
+        name: coords[:, i:i+1].requires_grad_(True)
+        for i, name in enumerate(order)
+    }

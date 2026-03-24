@@ -1,4 +1,3 @@
-/src/plot/__pycache__
-/src/geometry/__pycache__
 net_graph.pdf
-/src/neuralnet/__pycache__
+*.pyc
+/checkpoints_test
