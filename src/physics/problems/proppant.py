@@ -14,7 +14,7 @@ class proppantDynamics_dless(Physics):
         py — dp/dy
 
     PDE:
-        dc/dt + w^2/mu * px * dc/dx + alpha^2 * w^2/mu * (py - (1+rc)G) * dc/dy = 0
+        dc/dt - w^2/mu * px * dc/dx - alpha^2 * w^2/mu * (py - (1+rc)G) * dc/dy = 0
         d/dx(w^3/mu * px) + d/dy(w^3/mu * (py - (1+rc)G)) = 0
         mu = (1 - c)^beta
 
@@ -55,7 +55,7 @@ class proppantDynamics_dless(Physics):
             "c": lambda x, y: torch.zeros_like(x)
         }
         self.transforms = {
-            "c": lambda c: smooth_clamp(c, lo=0.0, hi=1.0, eps=1e-3),
+            "c": lambda c: smooth_clamp(c, lo=0.0, hi=0.999, eps=1e-4),
         }
         self.funcPar = funcPar or {
             "w": lambda x, y: torch.ones_like(x)

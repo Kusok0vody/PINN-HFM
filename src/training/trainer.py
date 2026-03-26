@@ -49,8 +49,7 @@ class Trainer:
         self.device           = device
         self.logger_type      = logger
 
-        # self.mu = pinn.physics.set_mu().to(device).requires_grad_(True)
-        self.mu = pinn.physics.set_par()
+        self.mu = pinn.physics.set_par().to(device)
 
         self.optimiser = torch.optim.NAdam(
             pinn.net.parameters(),
@@ -145,7 +144,7 @@ class Trainer:
 
             self.optimiser.zero_grad()
 
-            residuals        = self.pinn.step(self.mu)
+            residuals         = self.pinn.step(self.mu)
             total, loss_terms = self._aggregate_loss(residuals)
 
             total.backward()

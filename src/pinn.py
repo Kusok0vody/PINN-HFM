@@ -9,12 +9,15 @@ class PINN(nn.Module):
     Core PINN block. Connects net, physics and sampler.
     """
 
-    def __init__(self, net, physics, sampler):
+    def __init__(self, net, physics, sampler, device="cpu"):
         super().__init__()
         self.net     = net
         self.physics = physics
         self.sampler = sampler
         self.points  = None
+        self.device  = torch.device(device)
+        
+        self.net.to(self.device)
 
         if hasattr(physics, 'param_order') and hasattr(net, 'mu_dim'):
             expected = len(physics.param_order)
@@ -27,6 +30,20 @@ class PINN(nn.Module):
     def resample(self):
         """Generates a new pool of collocation points."""
         self.points = self.sampler.sample()
+        self._points_to_device()
+
+    def _points_to_device(self):
+        """Moves all sampled point tensors to device."""
+        pts = self.points
+        pts.interior.coords = pts.interior.coords.to(self.device)
+
+        for batch in pts.boundaries.values():
+            batch.coords = batch.coords.to(self.device)
+            batch.nx     = batch.nx.to(self.device)
+            batch.ny     = batch.ny.to(self.device)
+
+        if pts.initial is not None:
+            pts.initial.coords = pts.initial.coords.to(self.device)
 
     def step(self, mu: torch.Tensor) -> dict:
         """
@@ -45,10 +62,6 @@ class PINN(nn.Module):
         M = mu.shape[0]
 
         # --- PDE ---
-        # coords_pde = self.points.interior.coords.requires_grad_(True)
-        # pred_pde   = self.physics.apply_transforms(self.net(coords_pde, mu))
-        # res_pde    = self.physics.residualPDE(pred_pde, coords_pde, M)
-
         coords_raw = self.points.interior.coords
         unpacked   = unpack_coords_grad(coords_raw, self.physics.has_time, self.physics.dim)
         coords_cat = torch.cat(list(unpacked.values()), dim=1)
@@ -70,13 +83,13 @@ class PINN(nn.Module):
             res_ic    = self.physics.residualIC(pred_ic, coords_ic, M)
 
         # --- Extra ---
-        # res_extra = self.physics.residualExtra(pred_pde, coords_pde, M)
+        res_extra = self.physics.residualExtra(pred_pde, coords_cat, M)
 
         return {
             "pde":   res_pde,
             "bc":    res_bc,
             "ic":    res_ic,
-            # "extra": res_extra,
+            "extra": res_extra,
         }
 
     def __repr__(self) -> str:
@@ -84,5 +97,6 @@ class PINN(nn.Module):
         lines.append(f"  net:     {type(self.net).__name__}")
         lines.append(f"  physics: {type(self.physics).__name__}")
         lines.append(f"  sampler: {type(self.sampler).__name__}")
+        lines.append(f"  device:  {self.device}")
         lines.append(")")
         return "\n".join(lines)
