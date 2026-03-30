@@ -2,6 +2,16 @@ import torch
 import torch.nn as nn
 
 
+class ActivationFactory:
+    """Callable that creates a new activation instance each time."""
+    def __init__(self, cls, **kwargs):
+        self.cls    = cls
+        self.kwargs = kwargs
+
+    def __call__(self):
+        return self.cls(**self.kwargs)
+    
+
 class Sine(nn.Module):
     def __init__(self, omega: float = 30.0, trainable: bool = False):
         super().__init__()

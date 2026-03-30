@@ -55,7 +55,7 @@ class proppantDynamics_dless(Physics):
             "c": lambda x, y: torch.zeros_like(x)
         }
         self.transforms = {
-            "c": lambda c: smooth_clamp(c, lo=0.0, hi=0.999, eps=1e-4),
+            "c": lambda c: smooth_clamp(torch.sigmoid(c), lo=0.0, hi=0.999, eps=1e-4),
         }
         self.funcPar = funcPar or {
             "w": lambda x, y: torch.ones_like(x)
@@ -100,16 +100,17 @@ class proppantDynamics_dless(Physics):
             "correlation": derivative_batched(p_x, y) - derivative_batched(p_y, x),
         }
 
-    def residualBC(self, pred: dict, batch: BoundaryBatch, M: int) -> dict:
+    def residualBC(self, pred: dict, coords_bc: torch.Tensor, batch: BoundaryBatch, M: int) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
-        unpacked = unpack_coords(batch.coords, self.has_time, self.dim)
+        unpacked = unpack_coords(coords_bc, self.has_time, self.dim)
+
         t  = unpacked.get("t")
         x  = unpacked["x"]
         y  = unpacked["y"]
-        nx = batch.nx   # (N, 1)
-        ny = batch.ny   # (N, 1)
+        nx = batch.nx      # (N, 1)
+        ny = batch.ny      # (N, 1)
 
         c   = pred["c"]    # (N, M)
         p_x = pred["px"]   # (N, M)
@@ -122,8 +123,8 @@ class proppantDynamics_dless(Physics):
         r = self.par["r"].unsqueeze(0)           # (1, M)
         G = self.par["G"].unsqueeze(0)           # (1, M)
 
-        gravity = (1 + r * c) * G               # (N, M)
-        p_n     = p_x * nx + p_y * ny           # (N, M)
+        gravity = (1 + r * c) * G                # (N, M)
+        p_n     = p_x * nx + p_y * ny            # (N, M)
 
         residuals = {}
 
@@ -157,8 +158,8 @@ class proppantDynamics_dless(Physics):
                 if btype == "dirichlet":
                     residuals[key] = p_n - (val if val is not None else torch.zeros_like(p_n))
                 elif btype == "neumann":
-                    # dp/dn = -mu/w^2 * u_in + gravity*ny
+                    # dp/dn = -mu/w^2 * u_in*nx + gravity*ny
                     u_in = val if val is not None else torch.zeros_like(p_n)
-                    residuals[key] = p_n - (-mu / width**2 * u_in + gravity * ny)
+                    residuals[key] = p_n - (-mu / width**2 * u_in * nx + gravity * ny)
 
         return residuals

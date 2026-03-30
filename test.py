@@ -7,28 +7,17 @@ import matplotlib.gridspec as gridspec
 
 sys.path.append("src/")
 
-from geometry.geom       import Geometry
-from geometry.sampler    import Sampler
 from network.net         import Net
-from network.activations import Sine
+from network.activations import ActivationFactory, Sine, Morlet
 from physics.problems.proppant import proppantDynamics_dless
-from pinn                import PINN
-from utils               import smooth_clamp
 
-
-# =============================================================================
-# Параметры сетки и времени
-# =============================================================================
-
-N_grid = 128           # разрешение сетки N x N
-T_slices = [0.0, 0.25, 0.5, 0.75, 1.0]   # моменты времени для срезов
+# Parameters of grid and time
+N_grid = 128
+T_slices = [0.0, 0.25, 0.5, 0.75, 1.0]
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-# =============================================================================
-# Физические параметры (из debug.py)
-# =============================================================================
-
+# Physical parameters
 rho_f = 1.0
 rho_p = 1.2
 g     = 0.0
@@ -43,11 +32,7 @@ mu_list = [
     {"alpha": alpha, "beta": -2.5, "r": r, "G": G},
 ]
 
-
-# =============================================================================
-# Архитектура (должна совпадать с обученной моделью)
-# =============================================================================
-
+# Architecture
 outputs_config = {
     "c":  {},
     "px": {},
@@ -59,26 +44,31 @@ net = Net(
     mu_dim=4,
     dx=32,
     dmu=32,
-    d_h=64,
+    d_h=128,
     encoder_layers=2,
-    trunk_layers=4,
+    trunk_layers=6,
     head_layers=2,
     activation=nn.Tanh,
-    trunk_activation=Sine,
-    outputs_config=outputs_config,
-    use_film=True,
-    use_fourier=True,
+    encoder_activation=nn.Tanh,
+    trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
+    head_activation=nn.Tanh,
+    film_activation=nn.Tanh,
+    outputs_config={
+        "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        # "c":  {"multi": True, "K": 4},
+        "px": {},
+        "py": {},
+    },
+    use_film=False,
+    use_fourier=False,
     n_freqs=8,
     omega_min=1.0,
     omega_max=32.0,
 )
 
 
-# =============================================================================
-# Загрузка чекпоинта
-# =============================================================================
-
-CHECKPOINT = "checkpoints_test/ckpt_14975.pt"
+# Checkpoint loading
+CHECKPOINT = "checkpoints_test/ckpt_6975.pt"
 
 ckpt = torch.load(CHECKPOINT, map_location=device)
 net.load_state_dict(ckpt["net"])
@@ -87,15 +77,60 @@ net.eval()
 print(f"Loaded checkpoint: {CHECKPOINT}")
 
 
-# =============================================================================
-# Физика для set_par
-# =============================================================================
-
+# Boundaries
+chi = 0.5
+chi_u = (1 + chi)/2 
+chi_l = (1 - chi)/2 
 bounds = {
-    "inlet":  {"p": [0.0, 1.0], "x": lambda p: 0*p,     "y": lambda p: p      },
-    "outlet": {"p": [0.0, 1.0], "x": lambda p: 0*p + 1, "y": lambda p: p      },
-    "bottom": {"p": [0.0, 1.0], "x": lambda p: p,       "y": lambda p: 0*p    },
-    "top":    {"p": [0.0, 1.0], "x": lambda p: p,       "y": lambda p: 0*p + 1},
+    "lu_wall": {
+        "p": [chi_u, 1.0],
+        "x": lambda p: 0*p,
+        "y": lambda p: p,
+        "bc": {
+            "p": {"type": "neumann"},
+        }
+    },
+    "ll_wall": {
+        "p": [0.0, chi_l],
+        "x": lambda p: 0*p,
+        "y": lambda p: p,
+        "bc": {
+            "p": {"type": "neumann"},
+        }
+    },
+    "inlet": {
+        "p": [chi_l, chi_u],
+        "x": lambda p: 0*p,
+        "y": lambda p: p,
+        "bc": {
+            "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65},
+            "p": {"type": "neumann",   "value": lambda t, x, y: torch.ones_like(x)},
+        }
+    },
+    "outlet": {
+        "p": [0.0, 1.0],
+        "x": lambda p: 0*p + 1,
+        "y": lambda p: p,
+        "bc": {
+            "u": {"type": "neumann"},
+        }
+    },
+    "bottom": {
+        "p": [0.0, 1.0],
+        "x": lambda p: p,
+        "y": lambda p: 0*p,
+        "bc": {
+            "p": {"type": "neumann"},
+        }
+    },
+    "top": {
+        "p": [0.0, 1.0],
+        "x": lambda p: p,
+        "y": lambda p: 0*p + 1,
+        "bc": {
+            "p": {"type": "neumann"},
+        }
+    },
 }
 
 physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
@@ -110,32 +145,27 @@ physics.setParameters(
     boundaries=bounds,
 )
 
-mu_tensor = physics.set_par().to(device)   # (1, 4)
+mu_tensor = physics.set_par().to(device)
 
-
-# =============================================================================
-# Построение сетки и предсказание
-# =============================================================================
-
+# Net building and prediction
 xs = torch.linspace(0.0, 1.0, N_grid)
 ys = torch.linspace(0.0, 1.0, N_grid)
-YY, XX = torch.meshgrid(ys, xs, indexing="ij")   # (N_grid, N_grid)
+YY, XX = torch.meshgrid(ys, xs, indexing="ij")
 
-XX_flat = XX.reshape(-1, 1)   # (N², 1)
+XX_flat = XX.reshape(-1, 1)
 YY_flat = YY.reshape(-1, 1)
 
 
 def predict_at_t(t_val: float) -> dict:
-    """Returns dict of (N_grid, N_grid) numpy arrays for given t."""
     T_flat  = torch.full_like(XX_flat, t_val)
-    coords  = torch.cat([T_flat, YY_flat, XX_flat], dim=1).to(device)  # (N², 3) — [t, y, x]
+    coords  = torch.cat([T_flat, YY_flat, XX_flat], dim=1).to(device)
 
     with torch.no_grad():
         raw  = net(coords, mu_tensor)
         pred = physics.apply_transforms(raw)
 
     width   = torch.ones_like(XX_flat).to(device)
-    c       = pred["c"][:, 0:1]     # (N², 1) — первая постановка
+    c       = pred["c"][:, 0:1]
     p_x     = pred["px"][:, 0:1]
     p_y     = pred["py"][:, 0:1]
 
@@ -154,11 +184,7 @@ def predict_at_t(t_val: float) -> dict:
 
     return {"c": c, "ux": ux, "uy": uy}
 
-
-# =============================================================================
-# Отрисовка
-# =============================================================================
-
+# Plot
 n_t    = len(T_slices)
 fields = ["c", "ux", "uy"]
 titles = {"c": "Concentration $c$", "ux": "$u_x$", "py": "$u_y$"}
@@ -196,3 +222,12 @@ fig.suptitle("PINN solution", fontsize=14, y=1.01)
 plt.savefig("pinn_results.png", bbox_inches="tight", dpi=150)
 plt.show()
 print("Saved to pinn_results.png")
+
+# Check inlet
+plt.title("ux")
+plt.plot(ys, preds[0]["ux"][:,0], c='tab:red', label=np.sum(preds[0]["ux"][:,0]))
+plt.plot(ys, preds[0]["ux"][:,-1], c='tab:blue', label=np.sum(preds[0]["ux"][:,-1]))
+plt.grid()
+plt.legend()
+plt.xticks([0, 0.25, 0.5, 0.75, 1.0])
+plt.show()

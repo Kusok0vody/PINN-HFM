@@ -58,7 +58,7 @@ class MLP(nn.Module):
 
         for i in range(num_layers - 1):
             linear = nn.Linear(dim, hidden_dim)
-            act    = activation() if isinstance(activation, type) else activation
+            act = activation() if callable(activation) and not isinstance(activation, nn.Module) else activation
             _init_linear(linear, activation, is_first=(i == 0))
             layers.append(linear)
             layers.append(act)
@@ -75,20 +75,16 @@ class MLP(nn.Module):
 
 
 class MultiMLP(nn.Module):
-    def __init__(
-        self,
-        in_dim:     int,
-        hidden_dim: int,
-        num_layers: int,
-        activation,
-        K:          int,
-    ):
+    def __init__(self, in_dim, hidden_dim, num_layers, activation, K):
         super().__init__()
-
         self.mlps = nn.ModuleList([
-            MLP(in_dim, 1, hidden_dim, num_layers, activation)
+            MLP(in_dim, hidden_dim, hidden_dim, num_layers, activation)
             for _ in range(K)
         ])
+        self.head = nn.Linear(K * hidden_dim, 1)
+        nn.init.xavier_uniform_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.stack([mlp(x) for mlp in self.mlps], dim=0).sum(dim=0)
+    def forward(self, x):
+        outputs = torch.cat([mlp(x) for mlp in self.mlps], dim=-1)
+        return self.head(outputs)

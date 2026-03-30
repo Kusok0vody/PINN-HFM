@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from src.utils import unpack_coords_grad
+from src.utils import COORD_ORDER
 
 
 class PINN(nn.Module):
@@ -19,13 +19,13 @@ class PINN(nn.Module):
         
         self.net.to(self.device)
 
-        if hasattr(physics, 'param_order') and hasattr(net, 'mu_dim'):
-            expected = len(physics.param_order)
-            if net.mu_dim != expected:
-                raise ValueError(
-                    f"Net expects mu_dim={net.mu_dim}, "
-                    f"but physics has {expected} parameters: {physics.param_order}"
-                )
+        # if hasattr(physics, 'param_order') and hasattr(net, 'mu_dim'):
+        #     expected = len(physics.param_order)
+        #     if net.mu_dim != expected:
+        #         raise ValueError(
+        #             f"Net expects mu_dim={net.mu_dim}, "
+        #             f"but physics has {expected} parameters: {physics.param_order}"
+        #         )
 
     def resample(self):
         """Generates a new pool of collocation points."""
@@ -62,18 +62,24 @@ class PINN(nn.Module):
         M = mu.shape[0]
 
         # --- PDE ---
-        coords_raw = self.points.interior.coords
-        unpacked   = unpack_coords_grad(coords_raw, self.physics.has_time, self.physics.dim)
-        coords_cat = torch.cat(list(unpacked.values()), dim=1)
-        pred_pde   = self.physics.apply_transforms(self.net(coords_cat, mu))
+        unpacked = {}
+        for i, name in enumerate(COORD_ORDER[(self.physics.has_time, self.physics.dim)]):
+            col = self.points.interior.coords[:, i:i+1].detach().requires_grad_(True)
+            unpacked[name] = col
+        coords_pde = torch.cat(list(unpacked.values()), dim=1)
+        pred_pde   = self.physics.apply_transforms(self.net(coords_pde, mu))
         res_pde    = self.physics.residualPDE(pred_pde, unpacked, M)
 
         # --- BC ---
         res_bc = {}
         for name, batch in self.points.boundaries.items():
-            coords_bc = batch.coords.requires_grad_(True)
+            unpacked_bc = {}
+            for i, cname in enumerate(COORD_ORDER[(self.physics.has_time, self.physics.dim)]):
+                col = batch.coords[:, i:i+1].detach().requires_grad_(True)
+                unpacked_bc[cname] = col
+            coords_bc = torch.cat(list(unpacked_bc.values()), dim=1)
             pred_bc   = self.physics.apply_transforms(self.net(coords_bc, mu))
-            res_bc.update(self.physics.residualBC(pred_bc, batch, M))
+            res_bc.update(self.physics.residualBC(pred_bc, coords_bc, batch, M))
 
         # --- IC ---
         res_ic = {}
@@ -83,7 +89,7 @@ class PINN(nn.Module):
             res_ic    = self.physics.residualIC(pred_ic, coords_ic, M)
 
         # --- Extra ---
-        res_extra = self.physics.residualExtra(pred_pde, coords_cat, M)
+        res_extra = self.physics.residualExtra(pred_pde, coords_pde, M)
 
         return {
             "pde":   res_pde,
@@ -91,7 +97,7 @@ class PINN(nn.Module):
             "ic":    res_ic,
             "extra": res_extra,
         }
-
+        
     def __repr__(self) -> str:
         lines = ["PINN("]
         lines.append(f"  net:     {type(self.net).__name__}")
