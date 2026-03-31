@@ -19,14 +19,6 @@ class PINN(nn.Module):
         
         self.net.to(self.device)
 
-        # if hasattr(physics, 'param_order') and hasattr(net, 'mu_dim'):
-        #     expected = len(physics.param_order)
-        #     if net.mu_dim != expected:
-        #         raise ValueError(
-        #             f"Net expects mu_dim={net.mu_dim}, "
-        #             f"but physics has {expected} parameters: {physics.param_order}"
-        #         )
-
     def resample(self):
         """Generates a new pool of collocation points."""
         self.points = self.sampler.sample()
@@ -45,7 +37,7 @@ class PINN(nn.Module):
         if pts.initial is not None:
             pts.initial.coords = pts.initial.coords.to(self.device)
 
-    def step(self, mu: torch.Tensor) -> dict:
+    def step(self) -> dict:
         """
         Computes all residuals for a given parameter batch.
 
@@ -59,7 +51,7 @@ class PINN(nn.Module):
         if self.points is None:
             self.resample()
 
-        M = mu.shape[0]
+        parameters = self.physics.par.tensor
 
         # --- PDE ---
         unpacked = {}
@@ -67,8 +59,8 @@ class PINN(nn.Module):
             col = self.points.interior.coords[:, i:i+1].detach().requires_grad_(True)
             unpacked[name] = col
         coords_pde = torch.cat(list(unpacked.values()), dim=1)
-        pred_pde   = self.physics.apply_transforms(self.net(coords_pde, mu))
-        res_pde    = self.physics.residualPDE(pred_pde, unpacked, M)
+        pred_pde   = self.physics.apply_transforms(self.net(coords_pde, parameters))
+        res_pde    = self.physics.residualPDE(pred_pde, unpacked)
 
         # --- BC ---
         res_bc = {}
@@ -78,18 +70,18 @@ class PINN(nn.Module):
                 col = batch.coords[:, i:i+1].detach().requires_grad_(True)
                 unpacked_bc[cname] = col
             coords_bc = torch.cat(list(unpacked_bc.values()), dim=1)
-            pred_bc   = self.physics.apply_transforms(self.net(coords_bc, mu))
-            res_bc.update(self.physics.residualBC(pred_bc, coords_bc, batch, M))
+            pred_bc   = self.physics.apply_transforms(self.net(coords_bc, parameters))
+            res_bc.update(self.physics.residualBC(pred_bc, coords_bc, batch))
 
         # --- IC ---
         res_ic = {}
         if self.points.initial is not None:
             coords_ic = self.points.initial.coords
-            pred_ic   = self.physics.apply_transforms(self.net(coords_ic, mu))
-            res_ic    = self.physics.residualIC(pred_ic, coords_ic, M)
+            pred_ic   = self.physics.apply_transforms(self.net(coords_ic, parameters))
+            res_ic    = self.physics.residualIC(pred_ic, coords_ic)
 
         # --- Extra ---
-        res_extra = self.physics.residualExtra(pred_pde, coords_pde, M)
+        res_extra = self.physics.residualExtra(pred_pde, coords_pde)
 
         return {
             "pde":   res_pde,

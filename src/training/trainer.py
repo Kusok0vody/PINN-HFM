@@ -49,8 +49,6 @@ class Trainer:
         self.device           = device
         self.logger_type      = logger
 
-        self.mu = pinn.physics.set_par().to(device)
-
         self.optimiser = torch.optim.NAdam(
             pinn.net.parameters(),
             lr=lr,
@@ -110,7 +108,6 @@ class Trainer:
                 "net":       self.pinn.net.state_dict(),
                 "optimiser": self.optimiser.state_dict(),
                 "scheduler": self.scheduler.state_dict(),
-                "mu":        self.mu,
                 "points":    self.pinn.points,
             },
             f"{self.checkpoint_path}/ckpt_{step}.pt",
@@ -127,12 +124,10 @@ class Trainer:
         self.pinn.net.load_state_dict(ckpt["net"])
         self.optimiser.load_state_dict(ckpt["optimiser"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
-        self.mu          = ckpt["mu"]
         self.pinn.points = ckpt["points"]
         return ckpt["step"]
 
     def train(self):
-        self.pinn.net.to(self.device)
         self.pinn.resample()
 
         pbar = tqdm(range(self.n_iter), desc="Training")
@@ -144,7 +139,7 @@ class Trainer:
 
             self.optimiser.zero_grad()
 
-            residuals         = self.pinn.step(self.mu)
+            residuals         = self.pinn.step()
             total, loss_terms = self._aggregate_loss(residuals)
 
             total.backward()

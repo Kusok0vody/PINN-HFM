@@ -57,7 +57,8 @@ bounds = {
         "y": lambda p: p,
         "N": N_bound,
         "bc": {
-            "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65},
+            # "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65},
+            "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65 * (t <= 0.5).float()},
             "p": {"type": "neumann",   "value": lambda t, x, y: torch.ones_like(x)},
         }
     },
@@ -67,7 +68,7 @@ bounds = {
         "y": lambda p: p,
         "N": N_bound,
         "bc": {
-            "u": {"type": "neumann"},
+            # "u": {"type": "neumann"},
         }
     },
     "bottom": {
@@ -125,12 +126,13 @@ net = Net(
     head_activation=nn.Tanh,
     film_activation=nn.Tanh,
     outputs_config={
-        "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        # "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
         # "c":  {"multi": True, "K": 4},
         "px": {},
         "py": {},
     },
-    use_film=False,
+    use_film=True,
     use_fourier=False,
     n_freqs=8,
     omega_min=1.0,
@@ -165,22 +167,15 @@ G     = p0 * H * rho_f * g
 r     = 0.65 * (rho_p - rho_f) / rho_f
 alpha = L / H
 
-mu_list = [
+parameters = [
     {"alpha": alpha, "beta": -2.5, "r": r, "G": G},
 ]
 
-params = {
-    "alpha": torch.tensor([m["alpha"] for m in mu_list]).to(device),
-    "beta":  torch.tensor([m["beta"]  for m in mu_list]).to(device),
-    "r":     torch.tensor([m["r"]     for m in mu_list]).to(device),
-    "G":     torch.tensor([m["G"]     for m in mu_list]).to(device),
-}
-
-print(params)
+print(parameters)
 
 physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
 physics.setParameters(
-    params=params,
+    params=parameters,
     funcPar={
         "w": lambda x, y: torch.ones_like(x),
     },
@@ -202,11 +197,7 @@ print("=== PINN ===")
 print(pinn)
 print()
 
-mu_tensor = physics.set_par().to(device)
-print(f"  mu tensor: {mu_tensor.shape}")
-print()
-
-residuals = pinn.step(mu_tensor)
+residuals = pinn.step()
 print("=== Residuals ===")
 for group, res_dict in residuals.items():
     for name, res in res_dict.items():
@@ -215,7 +206,7 @@ print()
 
 
 # 5. Trainer
-n_iters = 50
+n_iters = 15000-1
 
 weights = {
     "convection":  1.0,
@@ -223,7 +214,7 @@ weights = {
     "correlation": 1.0,
     "bc":          10.0,
     "inlet_c":     10.0,
-    "ic":          1.0,
+    "ic":          10.0,
 }
 
 trainer = Trainer(
@@ -243,7 +234,7 @@ trainer.train()
 print()
 
 print("=== Residuals ===")
-residuals = pinn.step(mu_tensor)
+residuals = pinn.step()
 for group, res_dict in residuals.items():
     for name, res in res_dict.items():
         print(f"  {group}/{name}: mean={res.abs().mean().item():.6f}")

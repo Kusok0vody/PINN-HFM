@@ -28,7 +28,7 @@ G     = p0 * H * rho_f * g
 r     = 0.65 * (rho_p - rho_f) / rho_f
 alpha = L / H
 
-mu_list = [
+parameters = [
     {"alpha": alpha, "beta": -2.5, "r": r, "G": G},
 ]
 
@@ -54,12 +54,13 @@ net = Net(
     head_activation=nn.Tanh,
     film_activation=nn.Tanh,
     outputs_config={
-        "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        # "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
         # "c":  {"multi": True, "K": 4},
         "px": {},
         "py": {},
     },
-    use_film=False,
+    use_film=True,
     use_fourier=False,
     n_freqs=8,
     omega_min=1.0,
@@ -68,7 +69,7 @@ net = Net(
 
 
 # Checkpoint loading
-CHECKPOINT = "checkpoints_test/ckpt_6975.pt"
+CHECKPOINT = "checkpoints_test/ckpt_14925.pt"
 
 ckpt = torch.load(CHECKPOINT, map_location=device)
 net.load_state_dict(ckpt["net"])
@@ -135,17 +136,10 @@ bounds = {
 
 physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
 physics.setParameters(
-    params={
-        "alpha": torch.tensor([m["alpha"] for m in mu_list]).to(device),
-        "beta":  torch.tensor([m["beta"]  for m in mu_list]).to(device),
-        "r":     torch.tensor([m["r"]     for m in mu_list]).to(device),
-        "G":     torch.tensor([m["G"]     for m in mu_list]).to(device),
-    },
+    params=parameters,
     funcPar={"w": lambda x, y: torch.ones_like(x)},
     boundaries=bounds,
 )
-
-mu_tensor = physics.set_par().to(device)
 
 # Net building and prediction
 xs = torch.linspace(0.0, 1.0, N_grid)
@@ -161,7 +155,7 @@ def predict_at_t(t_val: float) -> dict:
     coords  = torch.cat([T_flat, YY_flat, XX_flat], dim=1).to(device)
 
     with torch.no_grad():
-        raw  = net(coords, mu_tensor)
+        raw  = net(coords, physics.par.tensor)
         pred = physics.apply_transforms(raw)
 
     width   = torch.ones_like(XX_flat).to(device)

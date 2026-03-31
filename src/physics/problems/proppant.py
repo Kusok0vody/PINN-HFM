@@ -1,5 +1,6 @@
 import torch
 from src.physics.phys import Physics
+from src.physics.parameters import *
 from src.utils import derivative_batched, unpack_coords, smooth_clamp
 from src.geometry.sampler import BoundaryBatch
 
@@ -38,14 +39,16 @@ class proppantDynamics_dless(Physics):
     def __init__(self, device="cpu", dim=2, has_time=True):
         super().__init__(device, dim, has_time)
 
-    def setParameters(self, params: dict, funcPar: dict, boundaries: dict, initial: dict = None):
+    def setParameters(self, params: list[dict], funcPar: dict, boundaries: dict, initial: dict = None):
         required = {"alpha", "beta", "r", "G"}
-        missing  = required - params.keys()
+        missing  = required - params[0].keys()
         if missing:
             raise ValueError(f"Missing parameters: {missing}")
 
-        # self.set_par(params)
-        self.par = params
+        self.param_order = list(params[0].keys())
+        self.par = self.make_param_batch(params)
+        self.par = self.par.to(self.device)
+
         self.boundaries = {
             name: bound["bc"]
             for name, bound in boundaries.items()
@@ -66,7 +69,7 @@ class proppantDynamics_dless(Physics):
         beta = self.par["beta"].unsqueeze(0)   # (1, M)
         return (1 - c) ** beta
 
-    def residualPDE(self, pred: dict, unpacked: dict, M: int) -> dict:
+    def residualPDE(self, pred: dict, unpacked: dict) -> dict:
         t = unpacked["t"]
         x = unpacked["x"]
         y = unpacked["y"]
@@ -100,7 +103,7 @@ class proppantDynamics_dless(Physics):
             "correlation": derivative_batched(p_x, y) - derivative_batched(p_y, x),
         }
 
-    def residualBC(self, pred: dict, coords_bc: torch.Tensor, batch: BoundaryBatch, M: int) -> dict:
+    def residualBC(self, pred: dict, coords_bc: torch.Tensor, batch: BoundaryBatch) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
@@ -120,8 +123,8 @@ class proppantDynamics_dless(Physics):
         mu    = self._viscosity(c)               # (N, M)
 
         alpha = self.par["alpha"].unsqueeze(0)   # (1, M)
-        r = self.par["r"].unsqueeze(0)           # (1, M)
-        G = self.par["G"].unsqueeze(0)           # (1, M)
+        r     = self.par["r"].unsqueeze(0)       # (1, M)
+        G     = self.par["G"].unsqueeze(0)       # (1, M)
 
         gravity = (1 + r * c) * G                # (N, M)
         p_n     = p_x * nx + p_y * ny            # (N, M)

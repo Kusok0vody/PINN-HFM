@@ -2,6 +2,7 @@ import torch
 from abc import ABC, abstractmethod
 
 from geometry.sampler import BoundaryBatch
+from physics.parameters import ParamBatch
 from utils import derivative_batched, unpack_coords
 
 
@@ -11,41 +12,30 @@ class Physics(ABC):
     """
 
     def __init__(self, device="cpu", dim=2, has_time=True):
-        self.device     = device
-        self.dim        = dim
-        self.has_time   = has_time
-        self.par        = {}
-        self.transforms = {}
-        self.boundaries = {}
-        self.initial    = {}
+        self.device      = device
+        self.dim         = dim
+        self.has_time    = has_time
+        self.transforms  = {}
+        self.boundaries  = {}
+        self.initial     = {}
+        self.param_order = []
+        self.par: ParamBatch = None
+    
+    def make_param_batch(self, par: list) -> ParamBatch:
+        return ParamBatch.from_dict(
+            {key: [m[key] for m in par] for key in self.param_order},
+            order=self.param_order,
+        )
     
     @abstractmethod
     def setParameters(self, params: dict, boundaries: dict, initial: dict = None):
         pass
 
-    def set_par(self) -> torch.Tensor:
-        """
-        Converts dictionary of parameter tensors to a single parameter tensor
-        and updates self.par with individual parameter tensors.
-
-        Returns:
-            par tensor (M, n_params) for passing to net
-        """
-        order = getattr(self, 'param_order', list(self.par.keys()))
-        
-        par_tensor = torch.stack([self.par[key] for key in order], dim=1)
-        
-        for i, key in enumerate(order):
-            self.par[key] = par_tensor[:, i]
-        
-        return par_tensor
-
     @abstractmethod
-    def residualPDE(self, pred: dict, coords: torch.Tensor, M: int) -> dict:
+    def residualPDE(self, pred: dict, coords: torch.Tensor) -> dict:
         pass
     
-    # @abstractmethod
-    def residualBC(self, pred: dict, batch: BoundaryBatch, M: int) -> dict:
+    def residualBC(self, pred: dict, batch: BoundaryBatch) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
@@ -81,7 +71,7 @@ class Physics(ABC):
 
         return residuals
 
-    def residualIC(self, pred: dict, coords: torch.Tensor, M: int) -> dict:
+    def residualIC(self, pred: dict, coords: torch.Tensor) -> dict:
         unpacked = unpack_coords(coords, self.has_time, self.dim)
         x = unpacked["x"]
         y = unpacked.get("y")
@@ -90,12 +80,10 @@ class Physics(ABC):
             name: pred[name] - ic(x, y)
             for name, ic in self.initial.items()
         }
-    
-    # @abstractmethod
-    def residualExtra(self, pred: dict, coords: torch.Tensor, M: int) -> dict:
+
+    def residualExtra(self, pred: dict, coords: torch.Tensor) -> dict:
         return {}
 
-    # @abstractmethod
     def apply_transforms(self, pred: dict) -> dict:
         """
         Applies output transforms to network predictions.
