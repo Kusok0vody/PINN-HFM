@@ -23,10 +23,10 @@ if device != 'cpu':
 print(device)
 
 # 1. Geometry
-N_bound = 4096
-N_wall = 1024
+N_bound = 8192
+N_wall = 2048
 N_pde = 8192
-N_ic = 4096
+N_ic = 8192
 
 chi = 0.5
 chi_u = (1 + chi)/2 
@@ -111,38 +111,45 @@ outputs_config = {
     "py": {},
 }
 
-net = Net(
-    x_dim=3,
-    mu_dim=4,
-    dx=32,
-    dmu=32,
-    d_h=128,
-    encoder_layers=2,
-    trunk_layers=6,
-    head_layers=2,
-    activation=nn.Tanh,
-    encoder_activation=nn.Tanh,
-    trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
-    head_activation=nn.Tanh,
-    film_activation=nn.Tanh,
-    outputs_config={
-        "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
-        # "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
-        # "c":  {"multi": True, "K": 4},
-        "px": {},
-        "py": {},
-    },
-    use_film=True,
-    use_fourier=False,
-    n_freqs=8,
-    omega_min=1.0,
-    omega_max=32.0,
-)
+# net = Net(
+#     x_dim=3,
+#     mu_dim=4,
+#     dx=32,
+#     dmu=32,
+#     d_h=128,
+#     encoder_layers=2,
+#     trunk_layers=6,
+#     head_layers=2,
+#     activation=nn.Tanh,
+#     encoder_activation=nn.Tanh,
+#     trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
+#     head_activation=nn.Tanh,
+#     film_activation=nn.Tanh,
+#     outputs_config={
+#         "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+#         # "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+#         # "c":  {"multi": True, "K": 4},
+#         "px": {},
+#         "py": {},
+#     },
+#     use_film=True,
+#     use_fourier=False,
+#     n_freqs=8,
+#     omega_min=1.0,
+#     omega_max=32.0,
+# )
 
-with torch.no_grad():
-    for name in ["px", "py"]:
-        net.outputs[name].net[-1].weight.data *= 0.01
-        net.outputs[name].net[-1].bias.data   *= 0.01
+net = Net(
+    x_dim=3, mu_dim=4,
+    dx=32, dmu=32, d_h=64,
+    encoder_layers=2,
+    trunk_layers=3,
+    head_layers=1,
+    activation=nn.Tanh,
+    outputs_config={"c": {}, "px": {}, "py": {}},
+    use_film=False,
+    use_fourier=False,
+)
 
 print("=== Network ===")
 print(net)
@@ -168,7 +175,7 @@ r     = 0.65 * (rho_p - rho_f) / rho_f
 alpha = L / H
 
 parameters = [
-    {"alpha": alpha, "beta": -2.5, "r": r, "G": G},
+    {"alpha": alpha, "beta": 0.0, "r": r, "G": G},
 ]
 
 print(parameters)
@@ -206,15 +213,18 @@ print()
 
 
 # 5. Trainer
-n_iters = 300
+n_iters = 20000
 
 weights = {
     "convection":  1.0,
     "poisson":     1.0,
     "correlation": 1.0,
     "bc":          10.0,
-    "inlet_c":     10.0,
-    "ic":          10.0,
+    "inlet_c":     100.0,
+    "inlet_p":     100.0,
+    "lu_wall_p":   50.0,
+    "ll_wall_p":   50.0,
+    "ic":          50.0,
 }
 
 trainer = Trainer(
@@ -226,8 +236,17 @@ trainer = Trainer(
     checkpoint_every=1000,
     checkpoint_path="checkpoints",
     run_name="proppant_debug",
-    save_final=True,
+    save_final=False,
     logger="tensorboard",
+    device=device,
+    start_step = 30000,
+)
+
+Trainer.load_checkpoint(
+    path="checkpoints/proppant_debug/ckpt_30000.pt",
+    pinn=pinn,
+    optimiser=trainer.optimiser,
+    scheduler=trainer.scheduler,
     device=device,
 )
 
@@ -238,8 +257,14 @@ print()
 print("=== Residuals ===")
 residuals = pinn.step()
 for group, res_dict in residuals.items():
+    group_total = 0
     for name, res in res_dict.items():
-        print(f"  {group}/{name}: mean={res.abs().mean().item():.6f}")
+        w    = weights.get(name, weights.get(group, 1.0))
+        val  = w * (res**2).mean().item()
+        group_total += val
+        print(f"  {group}/{name}: raw={res.abs().mean().item():.6f}  weighted={val:.6f}")
+    print(f"  {group} total: {group_total:.6f}")
+print(f"lr: {trainer.optimiser.param_groups[0]['lr']:.2e}")
 
 # print("=== Checkpoint test ===")
 # step = trainer.load_checkpoint("checkpoints_test/ckpt_25.pt")

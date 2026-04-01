@@ -8,10 +8,8 @@ import matplotlib.gridspec as gridspec
 sys.path.append("src/")
 
 from network.net         import Net
-# from network.activations import ActivationFactory, Sine, Morlet
 from physics.problems.proppant import proppantDynamics_dless
 from training.trainer import Trainer
-from physics.parameters import ParamBatch
 
 # Parameters of grid and time
 N_grid = 500
@@ -36,7 +34,7 @@ G     = p0 * H * rho_f * g
 r     = 0.65 * (rho_p - rho_f) / rho_f
 alpha = L / H
 
-parameters = [{"alpha": alpha, "beta": -2.5, "r": r, "G": G}]
+parameters = [{"alpha": alpha, "beta": 0.0, "r": r, "G": G}]
 
 physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
 physics.setParameters(
@@ -46,7 +44,7 @@ physics.setParameters(
 )
 
 # Checkpoint loading
-CHECKPOINT = "checkpoints/proppant_debug/ckpt_300.pt"
+CHECKPOINT = "checkpoints/proppant_debug/ckpt_50000.pt"
 
 net, step = Trainer.load_checkpoint(
     path=CHECKPOINT,

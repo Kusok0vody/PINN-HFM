@@ -19,7 +19,7 @@ class Trainer:
         pinn:             PINN instance
         mu_list:          list of parameter dicts [{"alpha": 1.0, ...}, ...]
         weights:          per-residual weights, e.g. {"convection": 1.0, "pde": 1.0}
-                          lookup order: exact name → group name → 1.0
+                          lookup order: exact name -> group name -> 1.0
         lr:               initial learning rate
         n_iter:           number of training iterations
         resample_every:   resample collocation points every K iterations
@@ -42,6 +42,7 @@ class Trainer:
         device:           str   = "cpu",
         run_name:         str   = None,
         save_final:       bool  = True,
+        start_step:       int   = 0,
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -54,6 +55,7 @@ class Trainer:
         self.checkpoint_every = checkpoint_every
         self.device           = device
         self.logger_type      = logger
+        self.start_step       = start_step
 
         self.optimiser = torch.optim.NAdam(
             pinn.net.parameters(),
@@ -62,8 +64,9 @@ class Trainer:
 
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimiser,
-            patience=500,
-            factor=0.5,
+            patience=2000,
+            factor=0.7,
+            min_lr=1e-6,
         )
 
         self._init_logger()
@@ -76,15 +79,14 @@ class Trainer:
             except ImportError:
                 print("tensorboard not installed: pip install tensorboard")
                 self.logger_type = "tqdm"
+                self.writer = None
         else:
             self.writer = None
 
     def _aggregate_loss(self, residuals: dict) -> tuple[torch.Tensor, dict]:
         """
-        Aggregates residuals into scalar loss using weights.
-
-        Lookup order for weight: exact residual name → group name → 1.0
-
+        Aggregates residuals into scalar loss using weights.\\
+        Lookup order for weight: exact residual name -> group name -> 1.0
         Returns:
             total loss tensor, dict of individual loss term values
         """
@@ -155,11 +157,11 @@ class Trainer:
     def train(self):
         self.pinn.resample()
 
-        pbar = tqdm(range(self.n_iter), desc="Training")
+        pbar = tqdm(range(self.start_step, self.start_step+self.n_iter+1), desc="Training")
 
         for step in pbar:
 
-            if step > 0 and step % self.resample_every == 0:
+            if step > self.start_step and step % self.resample_every == 0:
                 self.pinn.resample()
 
             self.optimiser.zero_grad()

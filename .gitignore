@@ -2,5 +2,6 @@ net_graph.pdf
 *.pyc
 /checkpoints_test
 *.png
+*.gif
 /runs
 /checkpoints
