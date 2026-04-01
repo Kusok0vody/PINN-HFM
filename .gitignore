@@ -3,3 +3,4 @@ net_graph.pdf
 /checkpoints_test
 *.png
 /runs
+/checkpoints

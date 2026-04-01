@@ -97,6 +97,28 @@ class Net(nn.Module):
     ):
         super().__init__()
 
+        self.config = {
+            "x_dim":              x_dim,
+            "mu_dim":             mu_dim,
+            "dx":                 dx,
+            "dmu":                dmu,
+            "d_h":                d_h,
+            "encoder_layers":     encoder_layers,
+            "trunk_layers":       trunk_layers,
+            "head_layers":        head_layers,
+            "activation":         activation,
+            "encoder_activation": encoder_activation,
+            "trunk_activation":   trunk_activation,
+            "head_activation":    head_activation,
+            "film_activation":    film_activation,
+            "outputs_config":     outputs_config,
+            "use_film":           use_film,
+            "use_fourier":        use_fourier,
+            "n_freqs":            n_freqs,
+            "omega_min":          omega_min,
+            "omega_max":          omega_max,
+        }
+
         self.use_film    = use_film
         self.use_fourier = use_fourier
 
@@ -255,3 +277,50 @@ class Net(nn.Module):
         lines.append(f"  {'Trainable parameters':50s}  {'':25s}  {trainable:>10,}")
         lines.append(")")
         return "\n".join(lines)
+    
+    def serialize_config(self) -> dict:
+        from network.activations import serialize_activation
+        import copy
+
+        cfg = copy.deepcopy(self.config)
+
+        for key in ("activation", "encoder_activation", "trunk_activation",
+                    "head_activation", "film_activation"):
+            if cfg[key] is not None:
+                cfg[key] = serialize_activation(cfg[key])
+
+        for name, out_cfg in cfg["outputs_config"].items():
+            if "activation" in out_cfg and out_cfg["activation"] is not None:
+                out_cfg["activation"] = serialize_activation(out_cfg["activation"])
+
+        return cfg
+
+    @staticmethod
+    def deserialize_config(cfg: dict) -> dict:
+        from network.activations import deserialize_activation
+        import copy
+
+        cfg = copy.deepcopy(cfg)
+
+        for key in ("activation", "encoder_activation", "trunk_activation",
+                    "head_activation", "film_activation"):
+            if cfg[key] is not None:
+                cfg[key] = deserialize_activation(cfg[key])
+
+        for name, out_cfg in cfg["outputs_config"].items():
+            if "activation" in out_cfg and out_cfg["activation"] is not None:
+                out_cfg["activation"] = deserialize_activation(out_cfg["activation"])
+
+        return cfg
+
+    @staticmethod
+    def from_checkpoint(path: str, device="cpu") -> "Net":
+        """
+        Восстанавливает Net полностью из чекпоинта — архитектура + веса.
+        """
+        ckpt = torch.load(path, map_location=device, weights_only=False)
+        cfg  = Net.deserialize_config(ckpt["net_config"])
+        net  = Net(**cfg)
+        net.load_state_dict(ckpt["net"])
+        net.to(device)
+        return net

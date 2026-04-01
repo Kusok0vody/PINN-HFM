@@ -206,7 +206,7 @@ print()
 
 
 # 5. Trainer
-n_iters = 15000-1
+n_iters = 300
 
 weights = {
     "convection":  1.0,
@@ -223,8 +223,10 @@ trainer = Trainer(
     lr=1e-4,
     n_iter=n_iters,
     resample_every=1000,
-    checkpoint_every=25,
-    checkpoint_path="checkpoints_test",
+    checkpoint_every=1000,
+    checkpoint_path="checkpoints",
+    run_name="proppant_debug",
+    save_final=True,
     logger="tensorboard",
     device=device,
 )

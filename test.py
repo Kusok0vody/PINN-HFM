@@ -8,14 +8,22 @@ import matplotlib.gridspec as gridspec
 sys.path.append("src/")
 
 from network.net         import Net
-from network.activations import ActivationFactory, Sine, Morlet
+# from network.activations import ActivationFactory, Sine, Morlet
 from physics.problems.proppant import proppantDynamics_dless
+from training.trainer import Trainer
+from physics.parameters import ParamBatch
 
 # Parameters of grid and time
-N_grid = 128
+N_grid = 500
 T_slices = [0.0, 0.25, 0.5, 0.75, 1.0]
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+# device
+torch.manual_seed(42)
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device='cpu'
+if device != 'cpu':
+    torch.cuda.set_device(device)
+print(device)
 
 # Physical parameters
 rho_f = 1.0
@@ -28,117 +36,21 @@ G     = p0 * H * rho_f * g
 r     = 0.65 * (rho_p - rho_f) / rho_f
 alpha = L / H
 
-parameters = [
-    {"alpha": alpha, "beta": -2.5, "r": r, "G": G},
-]
-
-# Architecture
-outputs_config = {
-    "c":  {},
-    "px": {},
-    "py": {},
-}
-
-net = Net(
-    x_dim=3,
-    mu_dim=4,
-    dx=32,
-    dmu=32,
-    d_h=128,
-    encoder_layers=2,
-    trunk_layers=6,
-    head_layers=2,
-    activation=nn.Tanh,
-    encoder_activation=nn.Tanh,
-    trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
-    head_activation=nn.Tanh,
-    film_activation=nn.Tanh,
-    outputs_config={
-        "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
-        # "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
-        # "c":  {"multi": True, "K": 4},
-        "px": {},
-        "py": {},
-    },
-    use_film=True,
-    use_fourier=False,
-    n_freqs=8,
-    omega_min=1.0,
-    omega_max=32.0,
-)
-
-
-# Checkpoint loading
-CHECKPOINT = "checkpoints_test/ckpt_14925.pt"
-
-ckpt = torch.load(CHECKPOINT, map_location=device)
-net.load_state_dict(ckpt["net"])
-net.to(device)
-net.eval()
-print(f"Loaded checkpoint: {CHECKPOINT}")
-
-
-# Boundaries
-chi = 0.5
-chi_u = (1 + chi)/2 
-chi_l = (1 - chi)/2 
-bounds = {
-    "lu_wall": {
-        "p": [chi_u, 1.0],
-        "x": lambda p: 0*p,
-        "y": lambda p: p,
-        "bc": {
-            "p": {"type": "neumann"},
-        }
-    },
-    "ll_wall": {
-        "p": [0.0, chi_l],
-        "x": lambda p: 0*p,
-        "y": lambda p: p,
-        "bc": {
-            "p": {"type": "neumann"},
-        }
-    },
-    "inlet": {
-        "p": [chi_l, chi_u],
-        "x": lambda p: 0*p,
-        "y": lambda p: p,
-        "bc": {
-            "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65},
-            "p": {"type": "neumann",   "value": lambda t, x, y: torch.ones_like(x)},
-        }
-    },
-    "outlet": {
-        "p": [0.0, 1.0],
-        "x": lambda p: 0*p + 1,
-        "y": lambda p: p,
-        "bc": {
-            "u": {"type": "neumann"},
-        }
-    },
-    "bottom": {
-        "p": [0.0, 1.0],
-        "x": lambda p: p,
-        "y": lambda p: 0*p,
-        "bc": {
-            "p": {"type": "neumann"},
-        }
-    },
-    "top": {
-        "p": [0.0, 1.0],
-        "x": lambda p: p,
-        "y": lambda p: 0*p + 1,
-        "bc": {
-            "p": {"type": "neumann"},
-        }
-    },
-}
+parameters = [{"alpha": alpha, "beta": -2.5, "r": r, "G": G}]
 
 physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
 physics.setParameters(
     params=parameters,
     funcPar={"w": lambda x, y: torch.ones_like(x)},
-    boundaries=bounds,
+    boundaries={},
+)
+
+# Checkpoint loading
+CHECKPOINT = "checkpoints/proppant_debug/ckpt_300.pt"
+
+net, step = Trainer.load_checkpoint(
+    path=CHECKPOINT,
+    device=device,
 )
 
 # Net building and prediction

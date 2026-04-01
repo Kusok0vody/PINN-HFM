@@ -25,6 +25,7 @@ class Physics(ABC):
         return ParamBatch.from_dict(
             {key: [m[key] for m in par] for key in self.param_order},
             order=self.param_order,
+            device = self.device
         )
     
     @abstractmethod

@@ -47,7 +47,6 @@ class proppantDynamics_dless(Physics):
 
         self.param_order = list(params[0].keys())
         self.par = self.make_param_batch(params)
-        self.par = self.par.to(self.device)
 
         self.boundaries = {
             name: bound["bc"]

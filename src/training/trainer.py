@@ -1,6 +1,7 @@
 import os
 import torch
 from tqdm import tqdm
+import datetime
 
 
 class Trainer:
@@ -39,13 +40,18 @@ class Trainer:
         checkpoint_path:  str   = "checkpoints",
         logger:           str   = "tqdm",
         device:           str   = "cpu",
+        run_name:         str   = None,
+        save_final:       bool  = True,
     ):
+        self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.save_final      = save_final
+        self.checkpoint_path = os.path.join(checkpoint_path, self.run_name)
+        
         self.pinn             = pinn
         self.weights          = weights or {}
         self.n_iter           = n_iter
         self.resample_every   = resample_every
         self.checkpoint_every = checkpoint_every
-        self.checkpoint_path  = checkpoint_path
         self.device           = device
         self.logger_type      = logger
 
@@ -104,28 +110,47 @@ class Trainer:
         os.makedirs(self.checkpoint_path, exist_ok=True)
         torch.save(
             {
-                "step":      step,
-                "net":       self.pinn.net.state_dict(),
-                "optimiser": self.optimiser.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-                "points":    self.pinn.points,
+                "step":       step,
+                "run_name":   self.run_name,
+                "net":        self.pinn.net.state_dict(),
+                "net_config": self.pinn.net.serialize_config(),
+                "optimiser":  self.optimiser.state_dict(),
+                "scheduler":  self.scheduler.state_dict(),
+                "points":     self.pinn.points,
             },
             f"{self.checkpoint_path}/ckpt_{step}.pt",
         )
 
-    def load_checkpoint(self, path: str) -> int:
+    @staticmethod
+    def load_checkpoint(path: str, pinn=None, optimiser=None, 
+                        scheduler=None, device="cpu") -> tuple:
         """
-        Loads checkpoint and restores training state.
+        Loads checkpoint and restores training state. \\
+        If pinn=None - get Net from checkpoint automaticaly. \\
+        else - load weights
 
         Returns:
-            step number from checkpoint
+            (net, step)
         """
-        ckpt = torch.load(path, map_location=self.device)
-        self.pinn.net.load_state_dict(ckpt["net"])
-        self.optimiser.load_state_dict(ckpt["optimiser"])
-        self.scheduler.load_state_dict(ckpt["scheduler"])
-        self.pinn.points = ckpt["points"]
-        return ckpt["step"]
+        from network.net import Net
+        
+        ckpt = torch.load(path, map_location=device, weights_only=False)
+
+        if pinn is None:
+            net = Net.from_checkpoint(path, device=device)
+        else:
+            pinn.net.load_state_dict(ckpt["net"])
+            pinn.net.to(device)
+            net = pinn.net
+
+        if optimiser is not None:
+            optimiser.load_state_dict(ckpt["optimiser"])
+        if scheduler is not None:
+            scheduler.load_state_dict(ckpt["scheduler"])
+        if pinn is not None and ckpt.get("points") is not None:
+            pinn.points = ckpt["points"]
+
+        return net, ckpt["step"]
 
     def train(self):
         self.pinn.resample()
@@ -158,3 +183,6 @@ class Trainer:
 
         if self.writer is not None:
             self.writer.close()
+            
+        if self.save_final:
+            self._save_checkpoint(self.n_iter)
