@@ -163,6 +163,7 @@ class Trainer:
 
             if step > self.start_step and step % self.resample_every == 0:
                 self.pinn.resample()
+                self.pinn.resample_adaptive()
 
             self.optimiser.zero_grad()
 

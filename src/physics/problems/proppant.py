@@ -106,9 +106,9 @@ class proppantDynamics_dless(Physics):
         if batch.name not in self.boundaries:
             return {}
 
-        unpacked = unpack_coords(coords_bc, self.has_time, self.dim)
+        unpacked, _ = unpack_coords(coords_bc, self.has_time, self.dim)
 
-        t  = unpacked.get("t")
+        t  = unpacked["t"]
         x  = unpacked["x"]
         y  = unpacked["y"]
         nx = batch.nx      # (N, 1)

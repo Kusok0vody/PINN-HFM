@@ -63,20 +63,26 @@ COORD_ORDER = {
     (False, 1): ["x"],
 }
 
-def unpack_coords(coords: torch.Tensor, has_time: bool, dim: int) -> dict:
+def unpack_coords(coords: torch.Tensor, has_time: bool, dim: int, 
+                  requires_grad: bool = False) -> tuple[dict, torch.Tensor]:
     """
-    Unpacks a coordinate tensor into a named dict.
+    Unpacks a coordinate tensor into a named dict and reconstructs the tensor.
 
     Args:
-        coords:   (N, n_coords)
-        has_time: whether time coordinate is present
-        dim:      spatial dimensionality
+        coords:       (N, n_coords)
+        has_time:     whether time coordinate is present
+        dim:          spatial dimensionality
+        requires_grad: whether to set requires_grad=True on each column
 
     Returns:
-        dict, e.g. {"t": (N,1), "y": (N,1), "x": (N,1)}
+        unpacked: dict {name: (N, 1)} with requires_grad if requested
+        coords:   (N, n_coords) reconstructed from unpacked columns
     """
-    order = COORD_ORDER[(has_time, dim)]
-    return {
-        name: coords[:, i:i+1]
-        for i, name in enumerate(order)
-    }
+    unpacked = {}
+    for i, name in enumerate(COORD_ORDER[(has_time, dim)]):
+        col = coords[:, i:i+1].detach()
+        if requires_grad:
+            col = col.requires_grad_(True)
+        unpacked[name] = col
+    coords_out = torch.cat(list(unpacked.values()), dim=1)
+    return unpacked, coords_out

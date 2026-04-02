@@ -10,12 +10,22 @@ class BoundaryBatch:
     nx:     torch.Tensor   # (n, 1)  — frozen outward normal, no grad
     ny:     torch.Tensor   # (n, 1)
     name:   str = ""
-
+    
+    def to(self, device) -> "BoundaryBatch":
+        return BoundaryBatch(
+            coords=self.coords.to(device),
+            nx=self.nx.to(device),
+            ny=self.ny.to(device),
+            name=self.name,
+        )
 
 @dataclass
 class CollocationBatch:
     """Interior (or initial-condition) collocation points."""
     coords: torch.Tensor   # (n, n_coords)
+    
+    def to(self, device) -> "CollocationBatch":
+        return CollocationBatch(coords=self.coords.to(device))
 
 
 @dataclass
@@ -27,6 +37,13 @@ class SampledPoints:
     interior:   CollocationBatch
     boundaries: dict = field(default_factory=dict)   # str -> BoundaryBatch
     initial:    CollocationBatch | None = None       # only when has_time=True
+
+    def to(self, device) -> "SampledPoints":
+        return SampledPoints(
+            interior=self.interior.to(device),
+            boundaries={name: b.to(device) for name, b in self.boundaries.items()},
+            initial=self.initial.to(device) if self.initial is not None else None,
+        )
 
 
 class Sampler:
@@ -220,6 +237,9 @@ class Sampler:
         
         t_col = torch.full((n, 1), geo.T[0])
         return torch.cat([t_col, spatial], dim=1)
+    
+    def _n_boundary(self, name: str) -> int:
+        return self.geometry.boundaries[name].get("N", self.n_boundary)
     
     def _x_bounds(self) -> tuple[float, float]:
         geo = self.geometry

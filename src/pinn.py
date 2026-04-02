@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
-from src.utils import COORD_ORDER
+from src.utils import unpack_coords
 
 
 class PINN(nn.Module):
@@ -9,33 +10,119 @@ class PINN(nn.Module):
     Core PINN block. Connects net, physics and sampler.
     """
 
-    def __init__(self, net, physics, sampler, device="cpu"):
+    def __init__(
+        self, net,
+        physics,
+        sampler,
+        n_refine: int      = 1,
+        adaptive_pde: bool = True,
+        adaptive_bc:  bool = False,
+        adaptive_ic:  bool = False,
+        device="cpu"
+        ):
+        from src.geometry.sampler import Sampler, SampledPoints
+        from src.physics.phys import Physics
+        from src.network.net import Net
+        
         super().__init__()
-        self.net     = net
-        self.physics = physics
-        self.sampler = sampler
-        self.points  = None
-        self.device  = torch.device(device)
+        self.net:Net               = net
+        self.physics: Physics      = physics
+        self.sampler: Sampler      = sampler
+        self.points: SampledPoints = None
+        self.n_refine              = n_refine
+        self.device                = torch.device(device)
+        
+        self.adaptive_pde = adaptive_pde
+        self.adaptive_bc  = adaptive_bc
+        self.adaptive_ic  = adaptive_ic
         
         self.net.to(self.device)
 
     def resample(self):
         """Generates a new pool of collocation points."""
-        self.points = self.sampler.sample()
-        self._points_to_device()
+        self.points = self.sampler.sample().to(self.device)
 
-    def _points_to_device(self):
-        """Moves all sampled point tensors to device."""
-        pts = self.points
-        pts.interior.coords = pts.interior.coords.to(self.device)
+    def resample_adaptive(self):
+        from src.geometry.sampler import SampledPoints, BoundaryBatch, CollocationBatch
 
-        for batch in pts.boundaries.values():
-            batch.coords = batch.coords.to(self.device)
-            batch.nx     = batch.nx.to(self.device)
-            batch.ny     = batch.ny.to(self.device)
+        for _ in (range(self.n_refine)):
+            new_points = self.sampler.sample().to(self.device)
 
-        if pts.initial is not None:
-            pts.initial.coords = pts.initial.coords.to(self.device)
+            if (self.adaptive_pde):
+                pde_combined = torch.cat([
+                    self.points.interior.coords,
+                    new_points.interior.coords
+                ])
+                unpacked, coords_pde = unpack_coords(
+                    pde_combined, self.physics.has_time, self.physics.dim, requires_grad=True
+                )
+                pred_pde   = self.physics.apply_transforms(self.net(coords_pde, self.physics.par.tensor))
+                res_pde    = self.physics.residualPDE(pred_pde, unpacked)
+                sumres_pde = torch.zeros(len(pde_combined), device=self.device)
+                for _, res in res_pde.items():
+                    sumres_pde += res.abs().mean(dim=1).detach()
+                
+                idx_pde    = torch.multinomial(sumres_pde / sumres_pde.sum(), self.sampler.n_interior, replacement=False).tolist()
+                interior   = pde_combined[idx_pde]
+            else:
+                interior = new_points.interior.coords
+            
+            if (self.adaptive_bc):
+                boundaries = {}
+                
+                for name, batch in self.points.boundaries.items():
+                    new_batch = new_points.boundaries[name]
+                    n = self.sampler._n_boundary(name)
+
+                    bc_combined = torch.cat([batch.coords, new_batch.coords])
+                    nx_combined = torch.cat([batch.nx, new_batch.nx])
+                    ny_combined = torch.cat([batch.ny, new_batch.ny])
+
+                    _, coords_bc = unpack_coords(
+                        bc_combined, self.physics.has_time, self.physics.dim, requires_grad=True
+                    )
+                    pred_bc   = self.physics.apply_transforms(self.net(coords_bc, self.physics.par.tensor))
+                    res_bc    = self.physics.residualBC(pred_bc, coords_bc, batch)
+
+                    sumres_bc = torch.zeros(len(bc_combined), device=self.device)
+                    for _, res in res_bc.items():
+                        sumres_bc += res.abs().mean(dim=1).detach()
+
+                    idx_bc = torch.multinomial(sumres_bc / sumres_bc.sum(), n, replacement=False)
+                    boundaries[name] = BoundaryBatch(
+                        coords=bc_combined[idx_bc],
+                        nx=nx_combined[idx_bc],
+                        ny=ny_combined[idx_bc],
+                        name=name,
+                    )
+            else:
+                boundaries = new_points.boundaries
+            
+            if self.points.initial is not None:
+                if (self.adaptive_ic):
+                    ic_combined = torch.cat([
+                        self.points.initial.coords,
+                        new_points.initial.coords
+                    ])
+                    _, coords_ic = unpack_coords(
+                        ic_combined, self.physics.has_time, self.physics.dim
+                    )
+                    pred_ic   = self.physics.apply_transforms(self.net(coords_ic, self.physics.par.tensor))
+                    res_ic    = self.physics.residualIC(pred_ic, coords_ic)
+                    sumres_ic = torch.zeros(len(ic_combined), device=self.device)
+                    for _, res in res_ic.items():
+                        sumres_ic += res.abs().mean(dim=1).detach()
+                    
+                    idx_ic    = torch.multinomial(sumres_ic / sumres_ic.sum(), self.sampler.n_initial, replacement=False).tolist()
+                    initial   = ic_combined[idx_ic]
+                else:
+                    initial = new_points.initial.coords
+
+            self.points = SampledPoints(
+                interior=CollocationBatch(coords=interior),
+                boundaries=boundaries,
+                initial=CollocationBatch(coords=initial) if initial is not None else None,
+            ).to(self.device)
 
     def step(self) -> dict:
         """
@@ -50,33 +137,32 @@ class PINN(nn.Module):
         """
         if self.points is None:
             self.resample()
+            # self.resample_adaptive()
 
         parameters = self.physics.par.tensor
 
-        # --- PDE ---
-        unpacked = {}
-        for i, name in enumerate(COORD_ORDER[(self.physics.has_time, self.physics.dim)]):
-            col = self.points.interior.coords[:, i:i+1].detach().requires_grad_(True)
-            unpacked[name] = col
-        coords_pde = torch.cat(list(unpacked.values()), dim=1)
+        # --- PDE ---        
+        unpacked, coords_pde = unpack_coords(
+            self.points.interior.coords, self.physics.has_time, self.physics.dim, requires_grad=True
+        )
         pred_pde   = self.physics.apply_transforms(self.net(coords_pde, parameters))
         res_pde    = self.physics.residualPDE(pred_pde, unpacked)
 
         # --- BC ---
         res_bc = {}
-        for name, batch in self.points.boundaries.items():
-            unpacked_bc = {}
-            for i, cname in enumerate(COORD_ORDER[(self.physics.has_time, self.physics.dim)]):
-                col = batch.coords[:, i:i+1].detach().requires_grad_(True)
-                unpacked_bc[cname] = col
-            coords_bc = torch.cat(list(unpacked_bc.values()), dim=1)
+        for _, batch in self.points.boundaries.items():
+            _, coords_bc = unpack_coords(
+                batch.coords, self.physics.has_time, self.physics.dim, requires_grad=True
+            )
             pred_bc   = self.physics.apply_transforms(self.net(coords_bc, parameters))
             res_bc.update(self.physics.residualBC(pred_bc, coords_bc, batch))
 
         # --- IC ---
         res_ic = {}
         if self.points.initial is not None:
-            coords_ic = self.points.initial.coords
+            _, coords_ic = unpack_coords(
+                self.points.initial.coords, self.physics.has_time, self.physics.dim
+            )
             pred_ic   = self.physics.apply_transforms(self.net(coords_ic, parameters))
             res_ic    = self.physics.residualIC(pred_ic, coords_ic)
 

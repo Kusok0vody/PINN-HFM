@@ -105,12 +105,6 @@ print()
 # plot_samples(pts, title="Test geometry")
 
 # 2. Network
-outputs_config = {
-    "c":  {},
-    "px": {},
-    "py": {},
-}
-
 # net = Net(
 #     x_dim=3,
 #     mu_dim=4,
@@ -144,9 +138,20 @@ net = Net(
     dx=32, dmu=32, d_h=64,
     encoder_layers=2,
     trunk_layers=3,
-    head_layers=1,
+    head_layers=3,
     activation=nn.Tanh,
-    outputs_config={"c": {}, "px": {}, "py": {}},
+    encoder_activation=nn.Tanh,
+    trunk_activation=ActivationFactory(Sine, omega=0.5, trainable=True),
+    head_activation=nn.Tanh,
+    film_activation=nn.Tanh,
+    outputs_config={
+        # "c":  {},
+        "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        "px": {},
+        "py": {},
+        # "px": {"activation": ActivationFactory(Sine, omega = 0.5, trainable=False)},
+        # "py": {"activation": ActivationFactory(Sine, omega = 0.5, trainable=False)}
+    },
     use_film=False,
     use_fourier=False,
 )
@@ -198,7 +203,7 @@ print()
 
 
 # 4. PINN
-pinn = PINN(net, physics, samp, device)
+pinn = PINN(net, physics, samp, n_refine=10, device=device)
 
 print("=== PINN ===")
 print(pinn)
@@ -210,10 +215,12 @@ for group, res_dict in residuals.items():
     for name, res in res_dict.items():
         print(f"  {group}/{name}: {res.shape}  mean={res.abs().mean().item():.4f}")
 print()
+print("Points shape: ", pinn.points.interior.coords.shape)
 
 
 # 5. Trainer
 n_iters = 20000
+start   = 0
 
 weights = {
     "convection":  1.0,
@@ -232,23 +239,23 @@ trainer = Trainer(
     weights=weights,
     lr=1e-4,
     n_iter=n_iters,
-    resample_every=1000,
+    resample_every=2000,
     checkpoint_every=1000,
     checkpoint_path="checkpoints",
     run_name="proppant_debug",
     save_final=False,
     logger="tensorboard",
     device=device,
-    start_step = 30000,
+    start_step = start,
 )
 
-Trainer.load_checkpoint(
-    path="checkpoints/proppant_debug/ckpt_30000.pt",
-    pinn=pinn,
-    optimiser=trainer.optimiser,
-    scheduler=trainer.scheduler,
-    device=device,
-)
+# Trainer.load_checkpoint(
+#     path="checkpoints/proppant_debug/ckpt_start.pt",
+#     pinn=pinn,
+#     optimiser=trainer.optimiser,
+#     scheduler=trainer.scheduler,
+#     device=device,
+# )
 
 print(f"=== Training ({n_iters} iterations) ===")
 trainer.train()

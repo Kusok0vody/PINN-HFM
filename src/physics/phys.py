@@ -36,17 +36,17 @@ class Physics(ABC):
     def residualPDE(self, pred: dict, coords: torch.Tensor) -> dict:
         pass
     
-    def residualBC(self, pred: dict, batch: BoundaryBatch) -> dict:
+    def residualBC(self, pred: dict, coords_bc: torch.Tensor, batch: BoundaryBatch) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
-        unpacked = unpack_coords(batch.coords, self.has_time, self.dim)
-        t  = unpacked.get("t")
-        x  = unpacked["x"].requires_grad_(True)
-        y  = unpacked.get("y")
-        if y is not None:
-            y = y.requires_grad_(True)
-        nx, ny = batch.nx, batch.ny
+        unpacked, _ = unpack_coords(coords_bc, self.has_time, self.dim)
+
+        t  = unpacked["x"]
+        x  = unpacked["x"]
+        y  = unpacked["y"]
+        nx = batch.nx      # (N, 1)
+        ny = batch.ny      # (N, 1)
 
         residuals = {}
 
@@ -73,7 +73,7 @@ class Physics(ABC):
         return residuals
 
     def residualIC(self, pred: dict, coords: torch.Tensor) -> dict:
-        unpacked = unpack_coords(coords, self.has_time, self.dim)
+        unpacked, _ = unpack_coords(coords, self.has_time, self.dim)
         x = unpacked["x"]
         y = unpacked.get("y")
 
