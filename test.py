@@ -84,7 +84,7 @@ def predict_at_t(t_val: float) -> dict:
 
     ux = (-mob * p_x).squeeze(1).cpu().reshape(N_grid, N_grid).numpy()
     uy = (-mob * (p_y - gravity) * alpha_v).squeeze(1).cpu().reshape(N_grid, N_grid).numpy()
-    c  = c.squeeze(1).cpu().reshape(N_grid, N_grid).numpy()
+    c  = (c*0.65).squeeze(1).cpu().reshape(N_grid, N_grid).numpy()
 
     return {"c": c, "ux": ux, "uy": uy}
 
@@ -92,7 +92,7 @@ def predict_at_t(t_val: float) -> dict:
 n_t    = len(T_slices)
 fields = ["c", "ux", "uy"]
 titles = {"c": "Concentration $c$", "ux": "$u_x$", "py": "$u_y$"}
-cmaps  = {"c": "viridis", "ux": "RdBu_r", "uy": "RdBu_r"}
+cmaps  = {"c": "turbo", "ux": "jet", "uy": "seismic"}
 
 fig = plt.figure(figsize=(5 * n_t, 4 * len(fields)), dpi=150)
 gs  = gridspec.GridSpec(len(fields), n_t, figure=fig, hspace=0.35, wspace=0.25)

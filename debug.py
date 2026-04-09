@@ -135,7 +135,7 @@ print()
 
 net = Net(
     x_dim=3, mu_dim=4,
-    dx=32, dmu=32, d_h=64,
+    dx=64, dmu=32, d_h=64,
     encoder_layers=2,
     trunk_layers=3,
     head_layers=3,
