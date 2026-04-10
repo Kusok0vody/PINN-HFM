@@ -5,14 +5,14 @@ import torch.nn as nn
 
 sys.path.append("src/")
 
-from geometry.geom    import Geometry
-from geometry.sampler import Sampler
-from network.net      import Net
-from network.activations import ActivationFactory, Sine, Morlet
+from geometry.geom             import Geometry
+from geometry.sampler          import Sampler
+from network.net               import Net
+from network.activations       import ActivationFactory, Sine, Morlet
 from physics.problems.proppant import proppantDynamics_dless
-from visualization.plot import plot_samples
-from training.trainer import Trainer
-from pinn             import PINN
+from visualization.plot        import plot_samples
+from training.trainer          import Trainer
+from pinn                      import PINN
 
 
 torch.manual_seed(42)
@@ -57,7 +57,6 @@ bounds = {
         "y": lambda p: p,
         "N": N_bound,
         "bc": {
-            # "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65},
             "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65 * (t <= 0.5).float()},
             "p": {"type": "neumann",   "value": lambda t, x, y: torch.ones_like(x)},
         }
@@ -105,34 +104,6 @@ print()
 # plot_samples(pts, title="Test geometry")
 
 # 2. Network
-# net = Net(
-#     x_dim=3,
-#     mu_dim=4,
-#     dx=32,
-#     dmu=32,
-#     d_h=128,
-#     encoder_layers=2,
-#     trunk_layers=6,
-#     head_layers=2,
-#     activation=nn.Tanh,
-#     encoder_activation=nn.Tanh,
-#     trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
-#     head_activation=nn.Tanh,
-#     film_activation=nn.Tanh,
-#     outputs_config={
-#         "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
-#         # "c":  {"multi": True, "K": 4, "activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
-#         # "c":  {"multi": True, "K": 4},
-#         "px": {},
-#         "py": {},
-#     },
-#     use_film=True,
-#     use_fourier=False,
-#     n_freqs=8,
-#     omega_min=1.0,
-#     omega_max=32.0,
-# )
-
 net = Net(
     x_dim=3, mu_dim=4,
     dx=64, dmu=32, d_h=64,
@@ -145,12 +116,9 @@ net = Net(
     head_activation=nn.Tanh,
     film_activation=nn.Tanh,
     outputs_config={
-        # "c":  {},
         "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
         "px": {},
         "py": {},
-        # "px": {"activation": ActivationFactory(Sine, omega = 0.5, trainable=False)},
-        # "py": {"activation": ActivationFactory(Sine, omega = 0.5, trainable=False)}
     },
     use_film=False,
     use_fourier=False,
@@ -222,22 +190,9 @@ print("Points shape: ", pinn.points.interior.coords.shape)
 n_iters = 20000
 start   = 0
 
-weights = {
-    "convection":  1.0,
-    "poisson":     1.0,
-    "correlation": 1.0,
-    "bc":          10.0,
-    "inlet_c":     100.0,
-    "inlet_p":     100.0,
-    "lu_wall_p":   50.0,
-    "ll_wall_p":   50.0,
-    "ic":          50.0,
-}
-
 trainer = Trainer(
     pinn=pinn,
-    weights=weights,
-    lr=1e-4,
+    lr=1e-3,
     n_iter=n_iters,
     resample_every=2000,
     checkpoint_every=1000,
@@ -266,7 +221,7 @@ residuals = pinn.step()
 for group, res_dict in residuals.items():
     group_total = 0
     for name, res in res_dict.items():
-        w    = weights.get(name, weights.get(group, 1.0))
+        w    = trainer.adaptive_weights.get(name, trainer.adaptive_weights.get(group, 1.0))
         val  = w * (res**2).mean().item()
         group_total += val
         print(f"  {group}/{name}: raw={res.abs().mean().item():.6f}  weighted={val:.6f}")

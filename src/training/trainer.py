@@ -43,19 +43,29 @@ class Trainer:
         run_name:         str   = None,
         save_final:       bool  = True,
         start_step:       int   = 0,
+        gradnorm_every:   int   = 200,
+        lra_alpha:        float = 0.01
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
         self.checkpoint_path = os.path.join(checkpoint_path, self.run_name)
         
         self.pinn             = pinn
-        self.weights          = weights or {}
         self.n_iter           = n_iter
         self.resample_every   = resample_every
         self.checkpoint_every = checkpoint_every
         self.device           = device
         self.logger_type      = logger
         self.start_step       = start_step
+
+        self.gradnorm_every   = gradnorm_every
+        self.lra_alpha        = lra_alpha
+        self.adaptive_weights = {
+            f"{group}/{name}": 1.0
+            for group, res_dict in {}.items()
+            for name in res_dict
+        }
+        self._weights_initialized = False
 
         self.optimiser = torch.optim.NAdam(
             pinn.net.parameters(),
@@ -83,21 +93,53 @@ class Trainer:
         else:
             self.writer = None
 
+    def _update_weights_gradnorm(self, residuals: dict):
+        grad_norms = {}
+
+        for group, res_dict in residuals.items():
+            for name, res in res_dict.items():
+                key  = f"{group}/{name}"
+                w    = self.adaptive_weights.get(key, 1.0)
+                term = w * (res**2).mean()
+
+                self.optimiser.zero_grad()
+                term.backward(retain_graph=True)
+
+                grads = [
+                    p.grad.flatten()
+                    for p in self.pinn.net.parameters()
+                    if p.grad is not None
+                ]
+                if grads:
+                    grad_norms[key] = torch.cat(grads).norm().item()
+
+        self.optimiser.zero_grad()
+
+        if not grad_norms:
+            return
+
+        mean_norm = sum(grad_norms.values()) / len(grad_norms)
+
+        for key, norm in grad_norms.items():
+            if norm < 1e-12:
+                continue
+            w_new = mean_norm / (norm + 1e-8)
+            w_new = max(0.01, min(w_new, 100.0))
+            old   = self.adaptive_weights.get(key, 1.0)
+            self.adaptive_weights[key] = (
+                (1 - self.lra_alpha) * old + self.lra_alpha * w_new
+            )
+
     def _aggregate_loss(self, residuals: dict) -> tuple[torch.Tensor, dict]:
-        """
-        Aggregates residuals into scalar loss using weights.\\
-        Lookup order for weight: exact residual name -> group name -> 1.0
-        Returns:
-            total loss tensor, dict of individual loss term values
-        """
         loss_terms = {}
         total      = torch.tensor(0.0, device=self.device)
 
         for group, res_dict in residuals.items():
             for name, res in res_dict.items():
-                w    = self.weights.get(name, self.weights.get(group, 1.0))
-                term = w * (res ** 2).mean()
-                loss_terms[f"{group}/{name}"] = term.item()
+                key = f"{group}/{name}"
+                w   = self.adaptive_weights.get(key, 1.0)
+                term = w * (res**2).mean()
+                loss_terms[key] = term.item()
                 total = total + term
 
         return total, loss_terms
@@ -160,14 +202,18 @@ class Trainer:
         pbar = tqdm(range(self.start_step, self.start_step+self.n_iter+1), desc="Training")
 
         for step in pbar:
-
+            
             if step > self.start_step and step % self.resample_every == 0:
-                self.pinn.resample()
                 self.pinn.resample_adaptive()
 
             self.optimiser.zero_grad()
 
-            residuals         = self.pinn.step()
+            residuals = self.pinn.step()
+            if not self._weights_initialized or step % self.gradnorm_every == 0:
+                self._update_weights_gradnorm(residuals)
+                self._weights_initialized = True
+                residuals = self.pinn.step()
+                
             total, loss_terms = self._aggregate_loss(residuals)
 
             total.backward()

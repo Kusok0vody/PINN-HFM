@@ -93,14 +93,14 @@ n_t    = len(T_slices)
 fields = ["c", "ux", "uy"]
 titles = {"c": "Concentration $c$", "ux": "$u_x$", "py": "$u_y$"}
 cmaps  = {"c": "turbo", "ux": "jet", "uy": "seismic"}
+limits = {"c": [0, 0.65], "ux": [0, 1], "uy": [-2, 2]}
 
 fig = plt.figure(figsize=(5 * n_t, 4 * len(fields)), dpi=150)
 gs  = gridspec.GridSpec(len(fields), n_t, figure=fig, hspace=0.35, wspace=0.25)
 
 for row, field in enumerate(fields):
     preds = [predict_at_t(t) for t in T_slices]
-    vmin  = min(p[field].min() for p in preds)
-    vmax  = max(p[field].max() for p in preds)
+    vmin, vmax = limits[field]
 
     for col, (t_val, pred) in enumerate(zip(T_slices, preds)):
         ax  = fig.add_subplot(gs[row, col])
