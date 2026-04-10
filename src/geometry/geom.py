@@ -151,7 +151,18 @@ class Geometry:
     def inside_spatial(self, coords: torch.Tensor, n_disc: int = 200) -> torch.Tensor:
         if self.dim == 1:
             qx = coords[:, 0:1]
-            return self._inside_core(qx, None, n_disc)
+
+            with torch.no_grad():
+                x_vals = []
+                for bound in self.boundaries.values():
+                    p0, p1 = bound["p"]
+                    p_test = torch.tensor([p0, p1])
+                    x_vals.append(bound["x"](p_test))
+
+                x_vals = torch.cat(x_vals)
+
+            return (qx >= x_vals.min()) & (qx <= x_vals.max())
+
         qy = coords[:, 0:1]
         qx = coords[:, 1:2]
         return self._inside_core(qx, qy, n_disc)

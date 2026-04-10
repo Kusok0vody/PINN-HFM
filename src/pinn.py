@@ -163,13 +163,14 @@ class PINN(nn.Module):
         res_pde    = self.physics.residualPDE(pred_pde, unpacked)
 
         # --- BC ---
-        res_bc = {}
+        res_bc_raw = {}
         for _, batch in self.points.boundaries.items():
             _, coords_bc = unpack_coords(
                 batch.coords, self.physics.has_time, self.physics.dim, requires_grad=True
             )
             pred_bc   = self.physics.apply_transforms(self.net(coords_bc, parameters))
-            res_bc.update(self.physics.residualBC(pred_bc, coords_bc, batch))
+            res_bc_raw.update(self.physics.residualBC(pred_bc, coords_bc, batch))
+        res_bc = self.physics.apply_boundary_constraints(res_bc_raw)
 
         # --- IC ---
         res_ic = {}

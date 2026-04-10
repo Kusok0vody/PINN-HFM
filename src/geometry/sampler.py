@@ -173,15 +173,42 @@ class Sampler:
 
         return accepted[:n]
 
-    def _sample_boundaries(self) -> dict:
-        return {
-            name: self._sample_one_boundary(name, bound)
-            for name, bound in self.geometry.boundaries.items()
-        }
+    def _find_periodic_pairs(self):
+        pairs = []
+        visited = set()
 
-    def _sample_one_boundary(self, name: str, bound: dict) -> BoundaryBatch:
-        geo   = self.geometry
-        n   = bound.get("N", self.n_boundary)
+        for name, bound in self.geometry.boundaries.items():
+            if bound.get("periodic", False):
+                other = bound["with"]
+                key = tuple(sorted([name, other]))
+
+                if key not in visited:
+                    pairs.append((name, other))
+                    visited.add(key)
+
+        return pairs
+
+    def _sample_boundaries(self) -> dict:
+        boundaries = {}
+        used = set()
+
+        for name_L, name_R in self._find_periodic_pairs():
+            bL, bR = self._sample_periodic_pair(name_L, name_R)
+            boundaries[name_L] = bL
+            boundaries[name_R] = bR
+            used.add(name_L)
+            used.add(name_R)
+
+        for name, bound in self.geometry.boundaries.items():
+            if name in used:
+                continue
+            boundaries[name] = self._sample_one_boundary(name, bound)
+
+        return boundaries
+
+    def _sample_one_boundary(self, name: str, bound: dict, p=None, t=None) -> BoundaryBatch:
+        geo = self.geometry
+        n = bound.get("N", self.n_boundary)
         p_min, p_max = bound["p"]
 
         if n == 0:
@@ -193,25 +220,62 @@ class Sampler:
                 name=name,
             )
 
-        p = torch.empty(n).uniform_(p_min, p_max)
+        if p is None:
+            p = torch.empty(n).uniform_(p_min, p_max)
+
+        if geo.has_time:
+            if t is None:
+                t = torch.empty(n).uniform_(geo.T[0], geo.T[1])
 
         if geo.dim == 2:
             nx, ny = geo.compute_normal(bound, p)
         else:
-            nx = torch.zeros(n, 1)
-            ny = torch.zeros(n, 1)
+            x_vals = bound["x"](p).detach()
+
+            eps = 1e-6
+            x_test = x_vals + eps
+
+            test_pts = x_test.unsqueeze(1)
+
+            is_inside = geo.inside_spatial(test_pts)
+
+            sign = torch.where(is_inside, -1.0, 1.0).unsqueeze(1)
+
+            nx = sign
+            ny = torch.zeros_like(nx)
 
         parts = []
+
         if geo.has_time:
-            t = torch.empty(n).uniform_(geo.T[0], geo.T[1])
             parts.append(t)
+
         if geo.dim == 2:
             parts.append(bound["y"](p).detach())
+
         parts.append(bound["x"](p).detach())
 
         coords = torch.stack(parts, dim=1)
 
         return BoundaryBatch(coords=coords, nx=nx, ny=ny, name=name)
+
+    def _sample_periodic_pair(self, name_L: str, name_R: str):
+        geo = self.geometry
+        bound_L = geo.boundaries[name_L]
+        bound_R = geo.boundaries[name_R]
+
+        n = bound_L.get("N", self.n_boundary)
+        p_min, p_max = bound_L["p"]
+
+        p = torch.empty(n).uniform_(p_min, p_max)
+
+        t = None
+        if geo.has_time:
+            t = torch.empty(n).uniform_(geo.T[0], geo.T[1])
+
+        bL = self._sample_one_boundary(name_L, bound_L, p=p, t=t)
+        bR = self._sample_one_boundary(name_R, bound_R, p=p, t=t)
+
+        return bL, bR
 
     def _sample_initial(self) -> torch.Tensor:
         """

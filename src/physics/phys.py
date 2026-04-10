@@ -74,16 +74,51 @@ class Physics(ABC):
 
     def residualIC(self, pred: dict, coords: torch.Tensor) -> dict:
         unpacked, _ = unpack_coords(coords, self.has_time, self.dim)
+
         x = unpacked["x"]
-        y = unpacked.get("y")
+        y = unpacked.get("y", None)
+
+        def eval_ic(ic_func):
+            if self.dim == 1:
+                return ic_func(x)
+            else:
+                return ic_func(x, y)
 
         return {
-            name: pred[name] - ic(x, y)
+            name: pred[name] - eval_ic(ic)
             for name, ic in self.initial.items()
         }
-
+    
     def residualExtra(self, pred: dict, coords: torch.Tensor) -> dict:
         return {}
+
+    def apply_boundary_constraints(self, res_bc: dict) -> dict:
+        meta  = getattr(self, "boundary_meta", {})
+        final = {}
+        used  = set()
+
+        for name, m in meta.items():
+            if name in used or not m.get("periodic", False):
+                continue
+
+            pair = m["with"]
+            for key, val in res_bc.items():
+                bname, var = key.split("_", 1)
+                if bname != name:
+                    continue
+                k2 = f"{pair}_{var}"
+                if k2 in res_bc:
+                    final[f"periodic_{name}_{pair}_{var}"] = val - res_bc[k2]
+
+            used.add(name)
+            used.add(pair)
+
+        for key, val in res_bc.items():
+            bname = key.split("_", 1)[0]
+            if bname not in used:
+                final[key] = val
+
+        return final
 
     def apply_transforms(self, pred: dict) -> dict:
         """
