@@ -171,7 +171,14 @@ print()
 
 
 # 4. PINN
-pinn = PINN(net, physics, samp, n_refine=10, device=device)
+pinn = PINN(
+    net, physics, samp,
+    n_refine=10,
+    adaptive_pde=True,
+    adaptive_bc=False,
+    adaptive_ic=False,
+    device=device
+)
 
 print("=== PINN ===")
 print(pinn)
@@ -187,7 +194,7 @@ print("Points shape: ", pinn.points.interior.coords.shape)
 
 
 # 5. Trainer
-n_iters = 20000
+n_iters = 3000
 start   = 0
 
 trainer = Trainer(

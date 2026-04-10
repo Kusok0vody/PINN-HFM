@@ -42,6 +42,13 @@ class PINN(nn.Module):
         """Generates a new pool of collocation points."""
         self.points = self.sampler.sample().to(self.device)
 
+    def _safe_multinomial(self, weights: torch.Tensor, n: int) -> torch.Tensor:
+        s = weights.sum()
+        if s.item() < 1e-12:
+            weights = torch.ones_like(weights)
+            s = weights.sum()
+        return torch.multinomial(weights / s, n, replacement=False)
+
     def resample_adaptive(self):
         from src.geometry.sampler import SampledPoints, BoundaryBatch, CollocationBatch
 
@@ -62,7 +69,7 @@ class PINN(nn.Module):
                 for _, res in res_pde.items():
                     sumres_pde += res.abs().mean(dim=1).detach()
                 
-                idx_pde    = torch.multinomial(sumres_pde / sumres_pde.sum(), self.sampler.n_interior, replacement=False).tolist()
+                idx_pde    = self._safe_multinomial(sumres_pde, self.sampler.n_interior)
                 interior   = pde_combined[idx_pde]
             else:
                 interior = new_points.interior.coords
@@ -78,17 +85,24 @@ class PINN(nn.Module):
                     nx_combined = torch.cat([batch.nx, new_batch.nx])
                     ny_combined = torch.cat([batch.ny, new_batch.ny])
 
+                    combined_batch = BoundaryBatch(
+                        coords=bc_combined,
+                        nx=nx_combined,
+                        ny=ny_combined,
+                        name=name,
+                    )
+
                     _, coords_bc = unpack_coords(
                         bc_combined, self.physics.has_time, self.physics.dim, requires_grad=True
                     )
                     pred_bc   = self.physics.apply_transforms(self.net(coords_bc, self.physics.par.tensor))
-                    res_bc    = self.physics.residualBC(pred_bc, coords_bc, batch)
+                    res_bc    = self.physics.residualBC(pred_bc, coords_bc, combined_batch)
 
                     sumres_bc = torch.zeros(len(bc_combined), device=self.device)
                     for _, res in res_bc.items():
                         sumres_bc += res.abs().mean(dim=1).detach()
 
-                    idx_bc = torch.multinomial(sumres_bc / sumres_bc.sum(), n, replacement=False)
+                    idx_bc    = self._safe_multinomial(sumres_bc, n).tolist()
                     boundaries[name] = BoundaryBatch(
                         coords=bc_combined[idx_bc],
                         nx=nx_combined[idx_bc],
@@ -113,7 +127,7 @@ class PINN(nn.Module):
                     for _, res in res_ic.items():
                         sumres_ic += res.abs().mean(dim=1).detach()
                     
-                    idx_ic    = torch.multinomial(sumres_ic / sumres_ic.sum(), self.sampler.n_initial, replacement=False).tolist()
+                    idx_ic    = self._safe_multinomial(sumres_ic, self.sampler.n_initial).tolist()
                     initial   = ic_combined[idx_ic]
                 else:
                     initial = new_points.initial.coords

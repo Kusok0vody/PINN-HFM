@@ -44,7 +44,7 @@ physics.setParameters(
 )
 
 # Checkpoint loading
-CHECKPOINT = "checkpoints/proppant_debug/ckpt_20000.pt"
+CHECKPOINT = "checkpoints/proppant_debug/ckpt_3000.pt"
 
 net, step = Trainer.load_checkpoint(
     path=CHECKPOINT,
