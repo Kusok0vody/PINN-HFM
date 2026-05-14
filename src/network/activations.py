@@ -48,6 +48,8 @@ ACTIVATION_REGISTRY = {
     "SiLU":             nn.SiLU,
     "Sine":             Sine,
     "Morlet":           Morlet,
+    "Identity":         nn.Identity,
+    "Softplus":         nn.Softplus,
 }
 
 
@@ -60,7 +62,6 @@ def serialize_activation(act) -> dict | str:
         return {"cls": act.cls.__name__, "kwargs": act.kwargs, "_factory": True}
     if isinstance(act, type):
         return {"cls": act.__name__, "kwargs": {}, "_factory": False}
-    # instance (unlikely in config, but handle gracefully)
     return {"cls": type(act).__name__, "kwargs": {}, "_factory": False}
 
 

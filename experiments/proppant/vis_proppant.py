@@ -5,25 +5,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-sys.path.append("src/")
+sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
 
 from network.net         import Net
 from physics.problems.proppant import proppantDynamics_dless
 from training.trainer import Trainer
 
-# Parameters of grid and time
 N_grid = 500
 T_slices = [0.0, 0.25, 0.5, 0.75, 1.0]
 
-# device
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# device='cpu'
 if device != 'cpu':
     torch.cuda.set_device(device)
 print(device)
 
-# Physical parameters
 rho_f = 1.0
 rho_p = 1.2
 g     = 0.0
@@ -43,7 +39,6 @@ physics.setParameters(
     boundaries={},
 )
 
-# Checkpoint loading
 CHECKPOINT = "checkpoints/proppant_debug/ckpt_20000.pt"
 
 net, step = Trainer.load_checkpoint(
@@ -51,7 +46,6 @@ net, step = Trainer.load_checkpoint(
     device=device,
 )
 
-# Net building and prediction
 xs = torch.linspace(0.0, 1.0, N_grid)
 ys = torch.linspace(0.0, 1.0, N_grid)
 YY, XX = torch.meshgrid(ys, xs, indexing="ij")
@@ -88,7 +82,6 @@ def predict_at_t(t_val: float) -> dict:
 
     return {"c": c, "ux": ux, "uy": uy}
 
-# Plot
 n_t    = len(T_slices)
 fields = ["c", "ux", "uy"]
 titles = {"c": "Concentration $c$", "ux": "$u_x$", "py": "$u_y$"}
@@ -125,9 +118,8 @@ for row, field in enumerate(fields):
 fig.suptitle("PINN solution", fontsize=14, y=1.01)
 plt.savefig("pinn_results.png", bbox_inches="tight", dpi=150)
 plt.show()
-print("Saved to pinn_results.png")
+print("Saved --> pinn_results.png")
 
-# Check inlet
 plt.title("ux")
 plt.plot(ys, preds[0]["ux"][:,0], c='tab:red', label=np.sum(preds[0]["ux"][:,0]))
 plt.plot(ys, preds[0]["ux"][:,-1], c='tab:blue', label=np.sum(preds[0]["ux"][:,-1]))

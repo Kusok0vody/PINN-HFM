@@ -3,53 +3,91 @@ import math
 import torch
 import torch.nn as nn
 
-sys.path.append("src/")
+sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
 
-from geometry.geom                 import Geometry
-from geometry.sampler              import Sampler
-from network.net                   import Net
-from network.activations           import ActivationFactory, Sine, Morlet
-from physics.problems.convection1D import convection1D
-from visualization.plot            import plot_samples
-from training.trainer              import Trainer
-from pinn                          import PINN
+from geometry.geom             import Geometry
+from geometry.sampler          import Sampler
+from network.net               import Net
+from network.activations       import ActivationFactory, Sine, Morlet
+from physics.problems.proppant import proppantDynamics_dless
+from visualization.plot        import plot_samples
+from training.trainer          import Trainer
+from pinn                      import PINN
+
 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# device='cpu'
 if device != 'cpu':
     torch.cuda.set_device(device)
 print(device)
 
-# 1. Geometry
-N_bound = 256
-N_pde   = 512
-N_ic    = 256
+N_bound = 8192
+N_wall = 2048
+N_pde = 8192
+N_ic = 8192
+
+chi = 0.5
+chi_u = (1 + chi)/2 
+chi_l = (1 - chi)/2 
 
 bounds = {
-    "left": {
-        "p": [0, 1.0],
+    "lu_wall": {
+        "p": [chi_u, 1.0],
         "x": lambda p: 0*p,
-        "N": N_bound,
+        "y": lambda p: p,
+        "N": N_wall,
         "bc": {
-            "u": {"type": "dirichlet", "value": lambda t, x: torch.zeros_like(x)},
-        },
-        "periodic": True,
-        "with": "right"
+            "p": {"type": "neumann"},
+        }
     },
-    "right": {
-        "p": [0.0, 1.0],
-        "x": lambda p: 0*p + 6,
+    "ll_wall": {
+        "p": [0.0, chi_l],
+        "x": lambda p: 0*p,
+        "y": lambda p: p,
+        "N": N_wall,
+        "bc": {
+            "p": {"type": "neumann"},
+        }
+    },
+    "inlet": {
+        "p": [chi_l, chi_u],
+        "x": lambda p: 0*p,
+        "y": lambda p: p,
         "N": N_bound,
         "bc": {
-            "u": {"type": "dirichlet", "value": lambda t, x: torch.zeros_like(x)},
-        "periodic": True,
-        "with": "left"
+            "c": {"type": "dirichlet", "value": lambda t, x, y: torch.ones_like(x) * 0.25/0.65 * (t <= 0.5).float()},
+            "p": {"type": "neumann",   "value": lambda t, x, y: torch.ones_like(x)},
+        }
+    },
+    "outlet": {
+        "p": [0.0, 1.0],
+        "x": lambda p: 0*p + 1,
+        "y": lambda p: p,
+        "N": N_bound,
+        "bc": {
+        }
+    },
+    "bottom": {
+        "p": [0.0, 1.0],
+        "x": lambda p: p,
+        "y": lambda p: 0*p,
+        "N": N_bound,
+        "bc": {
+            "p": {"type": "neumann"},
+        }
+    },
+    "top": {
+        "p": [0.0, 1.0],
+        "x": lambda p: p,
+        "y": lambda p: 0*p + 1,
+        "N": N_bound,
+        "bc": {
+            "p": {"type": "neumann"},
         }
     },
 }
 
-geo  = Geometry(bounds, dim=1, has_time=True, T=[0.0, 1.0])
+geo  = Geometry(bounds, dim=2, has_time=True, T=[0.0, 1.0])
 samp = Sampler(geo, n_interior=N_pde, n_boundary=N_bound, n_initial=N_ic)
 
 pts = samp.sample()
@@ -60,13 +98,9 @@ for name, b in pts.boundaries.items():
     print(f"  boundary '{name}': {b.coords.shape}")
 print()
 
-import matplotlib.pyplot as plt
-plot_samples(pts, title="Test geometry")
-plt.savefig("convection_geometry.png", bbox_inches="tight", dpi=150)
 
-# 2. Network
 net = Net(
-    x_dim=2, mu_dim=1,
+    x_dim=3, mu_dim=4,
     dx=64, dmu=32, d_h=64,
     encoder_layers=2,
     trunk_layers=3,
@@ -77,7 +111,9 @@ net = Net(
     head_activation=nn.Tanh,
     film_activation=nn.Tanh,
     outputs_config={
-        "u":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        "c":  {"activation": ActivationFactory(Morlet, omega=3.0, trainable=True)},
+        "px": {},
+        "py": {},
     },
     use_film=False,
     use_fourier=False,
@@ -87,31 +123,39 @@ print("=== Network ===")
 print(net)
 print()
 
-X  = torch.randn(10, 2)
-mu = torch.randn(3, 1)
+X  = torch.randn(10, 3)
+mu = torch.randn(3, 4)
 out = net(X, mu)
 for name, val in out.items():
     print(f"  out['{name}']: {val.shape}")
 print()
 
-# 3. Physics
-beta_min = 0.01
-beta_mean = 5
-beta_max = 100
-N_beta = 10
+
+rho_f = 1.0
+rho_p = 1.2
+g     = 0.0
+H     = 1;  L = 1
+
+p0    = 1 / (12 * 0.01 * L * 1)
+G     = p0 * H * rho_f * g
+r     = 0.65 * (rho_p - rho_f) / rho_f
+alpha = L / H
 
 parameters = [
-    {"beta": beta_mean},
+    {"alpha": alpha, "beta": 0.0, "r": r, "G": G},
 ]
 
 print(parameters)
 
-physics = convection1D(dim=1, has_time=True, device=device)
+physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
 physics.setParameters(
     params=parameters,
+    funcPar={
+        "w": lambda x, y: torch.ones_like(x),
+    },
     boundaries=bounds,
     initial={
-        "u": lambda x: torch.ones_like(x) + torch.sin(x),
+        "c": lambda x, y: torch.zeros_like(x),
     }
 )
 
@@ -119,7 +163,7 @@ print("=== Physics ===")
 print(f"  boundaries:  {list(physics.boundaries.keys())}")
 print()
 
-# 4. PINN
+
 pinn = PINN(
     net, physics, samp,
     n_refine=10,
@@ -141,8 +185,8 @@ for group, res_dict in residuals.items():
 print()
 print("Points shape: ", pinn.points.interior.coords.shape)
 
-# 5. Trainer
-n_iters = 5000
+
+n_iters = 20000
 start   = 0
 
 trainer = Trainer(
@@ -159,13 +203,6 @@ trainer = Trainer(
     start_step = start,
 )
 
-# Trainer.load_checkpoint(
-#     path="checkpoints/proppant_debug/ckpt_start.pt",
-#     pinn=pinn,
-#     optimiser=trainer.optimiser,
-#     scheduler=trainer.scheduler,
-#     device=device,
-# )
 
 print(f"=== Training ({n_iters} iterations) ===")
 trainer.train()
@@ -182,3 +219,6 @@ for group, res_dict in residuals.items():
         print(f"  {group}/{name}: raw={res.abs().mean().item():.6f}  weighted={val:.6f}")
     print(f"  {group} total: {group_total:.6f}")
 print(f"lr: {trainer.optimiser.param_groups[0]['lr']:.2e}")
+
+
+print("All tests passed!")

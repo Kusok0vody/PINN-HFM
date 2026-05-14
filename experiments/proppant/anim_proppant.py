@@ -4,12 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-sys.path.append("src/")
+sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
 
 from physics.problems.proppant import proppantDynamics_dless
 from training.trainer import Trainer
 
-# Config
 N_grid    = 200
 N_frames  = 100
 T_min     = 0.0
@@ -21,12 +20,10 @@ CMAPS      = {"c": "turbo", "ux": "jet", "uy": "seismic"}
 TITLES     = {"c": "Concentration $c$", "ux": "$u_x$", "uy": "$u_y$"}
 LIMITS     = {"c": [0, 1], "ux": [0, 1], "uy": [-2, 2]}
 
-# Device 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
-# Physics 
 rho_f = 1.0;  rho_p = 1.2;  g = 0.0
 H = 1;        L = 1
 p0    = 1 / (12 * 0.01 * L * 1)
@@ -41,19 +38,16 @@ physics.setParameters(
     boundaries={},
 )
 
-# Network
 net, step = Trainer.load_checkpoint(path=CHECKPOINT, device=device)
 net.eval()
 print(f"Loaded checkpoint at step {step}")
 
-# Grid
 xs = torch.linspace(0.0, 1.0, N_grid)
 ys = torch.linspace(0.0, 1.0, N_grid)
 YY, XX = torch.meshgrid(ys, xs, indexing="ij")
 XX_flat = XX.reshape(-1, 1)
 YY_flat = YY.reshape(-1, 1)
 
-# Predict 
 def predict_at_t(t_val: float) -> dict:
     T_flat = torch.full_like(XX_flat, t_val)
     coords = torch.cat([T_flat, YY_flat, XX_flat], dim=1).to(device)
@@ -82,22 +76,12 @@ def predict_at_t(t_val: float) -> dict:
         "uy": (-mob * (p_y - gravity) * alpha_v).squeeze(1).cpu().reshape(N_grid, N_grid).numpy(),
     }
 
-# precompute all frames
 t_vals = np.linspace(T_min, T_max, N_frames)
 print("Precomputing frames...")
 frames = [predict_at_t(t) for t in t_vals]
 print("Done.")
 
-# global vmin/vmax per field for consistent colorbar
-# vlims = {
-#     field: (
-#         min(f[field].min() for f in frames),
-#         max(f[field].max() for f in frames),
-#     )
-#     for field in FIELDS
-# }
 
-# Animation
 n_fields = len(FIELDS)
 fig, axes = plt.subplots(1, n_fields, figsize=(5 * n_fields, 4.5), dpi=120)
 

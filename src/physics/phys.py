@@ -1,5 +1,6 @@
 import torch
 from abc import ABC, abstractmethod
+from math import log
 
 from geometry.sampler import BoundaryBatch
 from physics.parameters import ParamBatch
@@ -20,7 +21,8 @@ class Physics(ABC):
         self.initial     = {}
         self.param_order = []
         self.par: ParamBatch = None
-    
+        self.limits      = {}
+        
     def make_param_batch(self, par: list) -> ParamBatch:
         return ParamBatch.from_dict(
             {key: [m[key] for m in par] for key in self.param_order},
@@ -36,15 +38,13 @@ class Physics(ABC):
     def residualPDE(self, pred: dict, coords: torch.Tensor) -> dict:
         pass
     
-    def residualBC(self, pred: dict, coords_bc: torch.Tensor, batch: BoundaryBatch) -> dict:
+    def residualBC(self, pred: dict, coords_bc: dict, batch: BoundaryBatch) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
-        unpacked, _ = unpack_coords(coords_bc, self.has_time, self.dim)
-
-        t  = unpacked["x"]
-        x  = unpacked["x"]
-        y  = unpacked["y"]
+        t  = coords_bc["t"]
+        x  = coords_bc["x"]
+        y  = coords_bc["y"]
         nx = batch.nx      # (N, 1)
         ny = batch.ny      # (N, 1)
 
@@ -130,3 +130,36 @@ class Physics(ABC):
             name: self.transforms[name](val) if name in self.transforms else val
             for name, val in pred.items()
         }
+        
+    def _resample_parameters(self) -> None:
+        """
+        Resamples only parameters that have limits defined.
+        All limit entries must share the same N (batch size).
+        """
+        if not hasattr(self, "limits") or not self.limits:
+            return
+
+        n = next(iter(self.limits.values()))["N"]
+        new_params = [{} for _ in range(n)]
+
+        for key, lim in self.limits.items():
+            lo, hi = lim["min"], lim["max"]
+            scale  = lim.get("scale", "log")
+
+            if scale == "log":
+                vals = torch.exp(
+                    torch.rand(n) * (log(hi) - log(lo)) + log(lo)
+                )
+            else:
+                vals = torch.rand(n) * (hi - lo) + lo
+
+            for i, v in enumerate(vals.tolist()):
+                new_params[i][key] = v
+
+        for key in self.param_order:
+            if key not in self.limits:
+                fixed_val = self.par[key][0].item()
+                for p in new_params:
+                    p[key] = fixed_val
+
+        self.par = self.make_param_batch(new_params)

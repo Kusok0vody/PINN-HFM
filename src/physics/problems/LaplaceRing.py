@@ -5,32 +5,32 @@ from src.utils import derivative_batched
 from src.geometry.sampler import BoundaryBatch
 
 
-class convection1D(Physics):
+class helmholtz2D_annulus(Physics):
     """
-    1D linear convection equation.
+    2D Helmholtz equation on an annulus.
 
     Variables:
-        u — transported scalar
+        u — scalar field
 
     PDE:
-        du/dt + beta * du/dx = 0
+        d2u/dx2 + d2u/dy2 + k * u = 0
 
     Boundary conditions:
-        u: periodic, u(t, 0) = u(t, L)
+        dirichlet / neumann per variable
 
     Initial condition:
-        u = u0(x)
+        none (stationary problem)
 
     Parameters (each is a tensor of shape (M,) for M parameter settings):
-        beta: convection speed
+        k: reaction / wave parameter
     """
 
-    def __init__(self, device="cpu", dim=1, has_time=True):
+    def __init__(self, device="cpu", dim=2, has_time=False):
         super().__init__(device, dim, has_time)
 
     def setParameters(self, params: list[dict], boundaries: dict,
                       initial: dict = None, limits: dict = {}):
-        required = {"beta"}
+        required = {"k"}
         missing  = required - params[0].keys()
         if missing:
             raise ValueError(f"Missing parameters: {missing}")
@@ -55,28 +55,30 @@ class convection1D(Physics):
             for name, bound in boundaries.items()
         }
 
-        self.initial = initial or {"u": lambda x: torch.zeros_like(x)}
         self.transforms = {"u": lambda u: u}
 
     def residualPDE(self, pred: dict, unpacked: dict) -> dict:
-        t = unpacked["t"]
         x = unpacked["x"]
+        y = unpacked["y"]
         u = pred["u"]
 
-        beta = self.par["beta"].unsqueeze(0)
+        k = self.par["k"].unsqueeze(0)
 
-        u_t = derivative_batched(u, t)
         u_x = derivative_batched(u, x)
+        u_y = derivative_batched(u, y)
+        u_xx = derivative_batched(u_x, x)
+        u_yy = derivative_batched(u_y, y)
 
-        return {"convection": u_t + beta * u_x}
+        return {"helmholtz": u_xx + u_yy + k * u}
 
     def residualBC(self, pred: dict, coords_bc: dict, batch: BoundaryBatch) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
-        t  = coords_bc["t"]
         x  = coords_bc["x"]
+        y  = coords_bc["y"]
         nx = batch.nx
+        ny = batch.ny
         u  = pred["u"]
 
         residuals = {}
@@ -86,12 +88,12 @@ class convection1D(Physics):
             key   = f"{batch.name}_{var_name}"
             btype = cond["type"]
             value = cond.get("value", None)
-            val   = value(t, x) if value is not None else None
+            val   = value(x, y) if value is not None else None
 
             if btype == "dirichlet":
                 residuals[key] = u - val
             elif btype == "neumann":
-                u_n    = derivative_batched(u, x) * nx
+                u_n    = derivative_batched(u, x) * nx + derivative_batched(u, y) * ny
                 target = val if val is not None else torch.zeros_like(u_n)
                 residuals[key] = u_n - target
 

@@ -32,7 +32,6 @@ class Trainer:
     def __init__(
         self,
         pinn,
-        weights:          dict  = None,
         lr:               float = 1e-3,
         n_iter:           int   = 10000,
         resample_every:   int   = 1000,
@@ -44,7 +43,8 @@ class Trainer:
         save_final:       bool  = True,
         start_step:       int   = 0,
         gradnorm_every:   int   = 200,
-        lra_alpha:        float = 0.01
+        lra_alpha:        float = 0.01,
+        param_every:      int   = 0,
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -66,6 +66,7 @@ class Trainer:
             for name in res_dict
         }
         self._weights_initialized = False
+        self.param_every = param_every
 
         self.optimiser = torch.optim.NAdam(
             pinn.net.parameters(),
@@ -74,8 +75,8 @@ class Trainer:
 
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimiser,
-            patience=2000,
-            factor=0.7,
+            patience=1000,
+            factor=0.5,
             min_lr=1e-6,
         )
 
@@ -202,6 +203,9 @@ class Trainer:
         pbar = tqdm(range(self.start_step, self.start_step+self.n_iter+1), desc="Training")
 
         for step in pbar:
+            
+            if self.param_every > 0 and step % self.param_every == 0:
+                self.pinn.physics._resample_parameters()
             
             if step > self.start_step and step % self.resample_every == 0:
                 self.pinn.resample_adaptive()

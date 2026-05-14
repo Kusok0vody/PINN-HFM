@@ -83,6 +83,7 @@ class Net(nn.Module):
         encoder_layers:     int,
         trunk_layers:       int,
         head_layers:        int,
+        film_layers:        int,
         activation,
         outputs_config:     dict,
         encoder_activation  = None,
@@ -106,6 +107,7 @@ class Net(nn.Module):
             "encoder_layers":     encoder_layers,
             "trunk_layers":       trunk_layers,
             "head_layers":        head_layers,
+            "film_layers":        film_layers,
             "activation":         activation,
             "encoder_activation": encoder_activation,
             "trunk_activation":   trunk_activation,
@@ -163,7 +165,7 @@ class Net(nn.Module):
                 in_dim=dmu,
                 out_dim=2 * d_h,
                 hidden_dim=d_h,
-                num_layers=2,
+                num_layers=film_layers,
                 activation=act_film,
             )
         else:

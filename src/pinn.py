@@ -112,6 +112,7 @@ class PINN(nn.Module):
             else:
                 boundaries = new_points.boundaries
             
+            initial = None
             if self.points.initial is not None:
                 if (self.adaptive_ic):
                     ic_combined = torch.cat([
@@ -165,11 +166,11 @@ class PINN(nn.Module):
         # --- BC ---
         res_bc_raw = {}
         for _, batch in self.points.boundaries.items():
-            _, coords_bc = unpack_coords(
+            coords_dict, coords_bc = unpack_coords(
                 batch.coords, self.physics.has_time, self.physics.dim, requires_grad=True
             )
             pred_bc   = self.physics.apply_transforms(self.net(coords_bc, parameters))
-            res_bc_raw.update(self.physics.residualBC(pred_bc, coords_bc, batch))
+            res_bc_raw.update(self.physics.residualBC(pred_bc, coords_dict, batch))
         res_bc = self.physics.apply_boundary_constraints(res_bc_raw)
 
         # --- IC ---
