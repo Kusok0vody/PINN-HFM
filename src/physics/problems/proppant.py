@@ -1,8 +1,8 @@
 import torch
-from src.physics.phys import Physics
-from src.physics.parameters import *
-from src.utils import derivative_batched, unpack_coords, smooth_clamp
-from src.geometry.sampler import BoundaryBatch
+from physics.phys import Physics
+from physics.parameters import *
+from utils import derivative_batched, unpack_coords, smooth_clamp
+from geometry.sampler import BoundaryBatch
 
 
 class proppantDynamics_dless(Physics):
@@ -102,15 +102,13 @@ class proppantDynamics_dless(Physics):
             "correlation": derivative_batched(p_x, y) - derivative_batched(p_y, x),
         }
 
-    def residualBC(self, pred: dict, coords_bc: torch.Tensor, batch: BoundaryBatch) -> dict:
+    def residualBC(self, pred: dict, coords_bc: dict, batch: BoundaryBatch) -> dict:
         if batch.name not in self.boundaries:
             return {}
 
-        unpacked, _ = unpack_coords(coords_bc, self.has_time, self.dim)
-
-        t  = unpacked["t"]
-        x  = unpacked["x"]
-        y  = unpacked["y"]
+        t  = coords_bc["t"]
+        x  = coords_bc["x"]
+        y  = coords_bc["y"]
         nx = batch.nx      # (N, 1)
         ny = batch.ny      # (N, 1)
 

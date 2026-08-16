@@ -179,10 +179,12 @@ class Trainer:
         """
         from network.net import Net
         
+        print(path)
         ckpt = torch.load(path, map_location=device, weights_only=False)
 
         if pinn is None:
             net = Net.from_checkpoint(path, device=device)
+            net.to(device)
         else:
             pinn.net.load_state_dict(ckpt["net"])
             pinn.net.to(device)
@@ -239,3 +241,113 @@ class Trainer:
             
         if self.save_final:
             self._save_checkpoint(self.n_iter)
+    
+    def train_expanding_horizon(self, T_target, n_stages, n_iter_per_stage=None):
+        """
+        Expanding-window time curriculum: train on [T_start, T_start + h],
+        [T_start, T_start + 2h], ..., [T_start, T_target] across n_stages stages.
+
+        The same network and optimiser are reused — each stage warm-starts from
+        the previous one. IC sampling stays at t = T_start throughout. The global
+        step counter is continuous, so checkpoints are uniquely named
+        (ckpt_{absolute_step}.pt) and the LR scheduler keeps its state.
+
+        Args:
+            T_target         : final time of the last stage
+            n_stages         : number of curriculum stages
+            n_iter_per_stage : int (same iters per stage) |
+                               callable(k, N) -> int (k is 1-based) |
+                               None (split self.n_iter equally across stages)
+        """
+        if n_iter_per_stage is None:
+            per_stage = max(1, self.n_iter // n_stages)
+            n_iter_fn = lambda k, N: per_stage
+        elif callable(n_iter_per_stage):
+            n_iter_fn = n_iter_per_stage
+        else:
+            v = int(n_iter_per_stage)
+            n_iter_fn = lambda k, N: v
+
+        geo           = self.pinn.sampler.geometry
+        T_start       = geo.T[0]
+        saved_n_iter  = self.n_iter
+        absolute_step = self.start_step
+
+        for k in range(1, n_stages + 1):
+            T_now    = T_start + (T_target - T_start) * k / n_stages
+            geo.T    = [T_start, T_now]
+            self.pinn.points = None
+
+            self.n_iter     = n_iter_fn(k, n_stages)
+            self.start_step = absolute_step
+
+            print(f"=== Stage {k}/{n_stages}: T in [{T_start:.4g}, {T_now:.4g}], "
+                  f"{self.n_iter} iters ===")
+            self.train()
+            absolute_step += self.n_iter + 1
+
+        self.n_iter = saved_n_iter
+        
+    def finetune_lbfgs(self, n_outer=100, n_cycles=1, max_iter=20, lr=1.0,
+                       history_size=100, tolerance_grad=1e-8,
+                       tolerance_change=1e-12, save_checkpoint=True):
+        """
+        L-BFGS post-training fine-tuning.
+
+        After Adam/NAdam has reached a good basin, L-BFGS typically drops the
+        loss another 1-2 orders of magnitude. The collocation pool is frozen
+        within each cycle (L-BFGS Hessian approximation requires a stationary
+        loss). If n_cycles > 1, the pool is refreshed via resample_adaptive()
+        between cycles and a fresh L-BFGS state is initialised each time.
+
+        Args:
+            n_outer        : L-BFGS outer calls per cycle
+            n_cycles       : number of L-BFGS phases (with resampling between)
+            max_iter       : line-search iterations per outer call
+            lr             : initial step length (strong_wolfe rescales it)
+            history_size   : L-BFGS memory (typical 50-200)
+            tolerance_grad : gradient-norm stop criterion
+        """
+        if self.pinn.points is None:
+            self.pinn.resample()
+
+        for cycle in range(n_cycles):
+            self.pinn.resample_adaptive()
+
+            lbfgs = torch.optim.LBFGS(
+                self.pinn.net.parameters(),
+                lr=lr,
+                max_iter=max_iter,
+                history_size=history_size,
+                tolerance_grad=tolerance_grad,
+                tolerance_change=tolerance_change,
+                line_search_fn="strong_wolfe",
+            )
+
+            state = {"loss": None}
+            pbar  = tqdm(range(n_outer),
+                         desc=f"L-BFGS cycle {cycle + 1}/{n_cycles}")
+
+            for k in pbar:
+                def closure():
+                    lbfgs.zero_grad()
+                    residuals = self.pinn.step()
+                    total, _  = self._aggregate_loss(residuals)
+                    total.backward()
+                    state["loss"] = total.item()
+                    return total
+
+                lbfgs.step(closure)
+
+                if self.logger_type == "tensorboard" and self.writer is not None:
+                    self.writer.add_scalar(
+                        "loss/total", state["loss"],
+                        self.start_step + cycle * n_outer + k,
+                    )
+
+                pbar.set_postfix({"loss": f"{state['loss']:.3e}"})
+
+            self.start_step += n_outer
+
+            if save_checkpoint:
+                self._save_checkpoint(self.n_iter+self.start_step)

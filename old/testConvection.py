@@ -4,21 +4,24 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
+sys.path.append("src/")
 
 from physics.problems.convection1D import convection1D
 from training.trainer import Trainer
 
+# Parameters of grid and time
 N_grid = 200
 N_time = 200
 
+# device
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 if device != 'cpu':
     torch.cuda.set_device(device)
 print(device)
 
-parameters = [{"beta": 5.0}]
+# Physical parameters
+parameters = [{"beta": 15.5}]
 print(parameters)
 
 physics = convection1D(dim=1, has_time=True, device=device)
@@ -30,13 +33,13 @@ physics.setParameters(
     }
 )
 
+# Checkpoint loading
 CHECKPOINT = "checkpoints/convection/ckpt_20000.pt"
 net, step = Trainer.load_checkpoint(path=CHECKPOINT, device=device)
 
-xmax = 2*torch.pi
-tmax = 4.0
-xs = torch.linspace(0.0, xmax, N_grid)
-ts = torch.linspace(0.0, tmax, N_time)
+# Grid
+xs = torch.linspace(0.0, 2*torch.pi, N_grid)
+ts = torch.linspace(0.0, 1.0, N_time)
 TT, XX = torch.meshgrid(ts, xs, indexing="ij")
 
 coords = torch.cat([TT.reshape(-1, 1), XX.reshape(-1, 1)], dim=1).to(device)
@@ -46,6 +49,7 @@ with torch.no_grad():
 
 u_pred = pred["u"].squeeze(1).cpu().reshape(N_time, N_grid).numpy()
 
+# Exact solution: u(x, t) = 1 + sin(x - beta*t)
 beta = parameters[0]["beta"]
 u_exact = 1.0 + np.sin(XX.numpy() - beta * TT.numpy())
 
@@ -81,7 +85,7 @@ for col, (title, arr) in enumerate(zip(titles, data)):
     im = ax.imshow(
         arr.T,
         origin="lower",
-        extent=[0, tmax, 0, xmax],
+        extent=[0, 1, 0, 2*torch.pi],
         aspect="auto",
         cmap=_cmap,
         vmin=_vmin,
@@ -97,8 +101,8 @@ for col, (title, arr) in enumerate(zip(titles, data)):
     else:
         ax.set_yticklabels([])
 
-    ax.set_xticks(np.linspace(0, tmax, 5))
-    ax.set_yticks(np.linspace(0, xmax, 7))
+    ax.set_xticks([0, 0.5, 1.0])
+    ax.set_yticks(np.linspace(0, 2*torch.pi, 7))
 
 fig.colorbar(ims[0], ax=[axes[0], axes[1]], label="$u$", fraction=0.046, pad=0.04, location='left')
 fig.colorbar(ims[2], ax=axes[2], label="|error|", fraction=0.046, pad=0.04)
@@ -108,6 +112,6 @@ fig.suptitle(
     fontsize=13, y=1.02
 )
 
-plt.savefig("images/pinn_results_convection.png", bbox_inches="tight", dpi=300)
+plt.savefig("pinn_results_convection.png", bbox_inches="tight", dpi=300)
 plt.show()
-print("Saved --> pinn_results_convection.png")
+print("Saved → pinn_results_convection.png")

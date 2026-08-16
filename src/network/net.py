@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 
-from src.network.mlp import MLP, MultiMLP, _init_linear
+from network.mlp import MLP, MultiMLP, _init_linear
 
 class FourierEmbedding(nn.Module):
     """

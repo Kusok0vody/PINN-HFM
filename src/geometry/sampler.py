@@ -1,7 +1,7 @@
 import torch
 from dataclasses import dataclass, field
 
-from src.geometry.geom import *
+from geometry.geom import *
 
 @dataclass
 class BoundaryBatch:

@@ -11,7 +11,7 @@ os.makedirs("images", exist_ok=True)
 from physics.problems.lotka_volterra import LotkaVolterra
 from training.trainer                import Trainer
 
-CHECKPOINT = "checkpoints/lotka_volterra/ckpt_24000.pt"
+CHECKPOINT = "checkpoints/lotka_volterra/ckpt_61607.pt"
 OUTPUT_PNG = "images/lotka_volterra.png"
 
 T_END = 30.0
@@ -106,35 +106,3 @@ plt.tight_layout()
 plt.savefig(OUTPUT_PNG, bbox_inches="tight", dpi=300)
 print(f"Saved --> {OUTPUT_PNG}")
 
-
-
-def plot_lotka_volterra(net, physics, T_end, t_np=None, ax=None, lw=2.0):
-    device_net = next(net.parameters()).device
-
-    if t_np is None:
-        t_np = np.linspace(0.0, T_end, 1000)
-
-    t_t = torch.tensor(t_np, dtype=torch.float32).unsqueeze(1).to(device_net)
-
-    with torch.no_grad():
-        raw  = net(t_t, physics.par.tensor)
-        pred = physics.apply_transforms(raw)
-
-    G = pred["G"].squeeze(1).cpu().numpy()
-    H = pred["H"].squeeze(1).cpu().numpy()
-    P = pred["P"].squeeze(1).cpu().numpy()
-
-    if ax is None:
-        _, ax = plt.subplots(figsize=(8, 4.5))
-
-    ax.plot(t_np, G, color="#2ca02c", linewidth=lw, label="$G(t)$")
-    ax.plot(t_np, H, color="#1f77b4", linewidth=lw, label="$H(t)$")
-    ax.plot(t_np, P, color="#d62728", linewidth=lw, label="$P(t)$")
-
-    ax.set_xlabel("$t$")
-    ax.set_ylabel("Population size")
-    ax.set_xlim(0, T_end)
-    ax.set_ylim(bottom=0)
-    ax.legend(fontsize=11)
-
-    return ax

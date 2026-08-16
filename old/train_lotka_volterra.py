@@ -1,8 +1,22 @@
+"""
+Обучение PINN: трёхзвенная система Лотки-Вольтерры
+
+    dG/dt = r*G*(1 - G/K) - alpha*G*H
+    dH/dt = e1*alpha*G*H  - d1*H - beta*H*P
+    dP/dt = e2*beta*H*P   - d2*P
+
+Реализация: dim=1, has_time=False  (t — «x»-координата)
+  - Левая граница (t=0): начальные условия G0, H0, P0 (Дирихле)
+  - Правая граница (t=T): свободная (N=0, условий нет)
+
+Чекпоинты: checkpoints/lotka_volterra/ckpt_*.pt
+"""
+
 import sys
 import torch
 import torch.nn as nn
 
-sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
+sys.path.append("src/")
 
 from geometry.geom                      import Geometry
 from geometry.sampler                   import Sampler
@@ -12,12 +26,14 @@ from physics.problems.lotka_volterra    import LotkaVolterra
 from training.trainer                   import Trainer
 from pinn                               import PINN
 
+# ── Воспроизводимость ─────────────────────────────────────────────────────────
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 if device.type != "cpu":
     torch.cuda.set_device(device)
 print(f"Device: {device}")
 
+# ── Параметры системы ─────────────────────────────────────────────────────────
 T_END = 30.0
 
 PARAMS = {
@@ -31,7 +47,7 @@ PARAMS = {
     "d2":    0.2,
 }
 
-N_PARAMS_BATCH = 20
+N_PARAMS_BATCH = 10
 
 params_definition = {
     "r":     {"min": 0.5,  "max": 2.0,  "N": N_PARAMS_BATCH, "scale": "linear"},
@@ -44,12 +60,14 @@ params_definition = {
     "d2":    {"min": 0.05, "max": 0.4,  "N": N_PARAMS_BATCH, "scale": "linear"},
 }
 
+# Начальные условия
 G0 = 0.8
 H0 = 0.4
 P0 = 0.2
 
-N_IC  = 1
-N_PDE = 256
+# ── 1. Геометрия ──────────────────────────────────────────────────────────────
+N_IC  = 1    # точек для IC (левая граница)
+N_PDE = 512   # внутренних точек
 
 bounds = {
     "ic": {
@@ -77,21 +95,29 @@ print(f"interior: {pts.interior.coords.shape}")
 for name, b in pts.boundaries.items():
     print(f"boundary '{name}': {b.coords.shape}")
 
-sine = ActivationFactory(Sine, omega=1.0, trainable=True)
+# ── 2. Сеть ───────────────────────────────────────────────────────────────────
 net = Net(
     x_dim=1, mu_dim=8,
     dx=128, dmu=128, d_h=64,
-    encoder_layers=4, trunk_layers=4, head_layers=3, film_layers=2,
-    activation=sine,
-    encoder_activation=nn.Tanh,
-    trunk_activation=sine,
-    head_activation=sine,
+    encoder_layers=4,
+    trunk_layers=4,
+    head_layers=3,
+    film_layers=2,
+    activation=nn.Tanh,
+    encoder_activation=nn.ReLU,
+    trunk_activation=nn.Tanh,
+    head_activation=nn.Tanh,
     film_activation=nn.Tanh,
-    outputs_config={"G": {}, "H": {}, "P": {}},
+    outputs_config={
+        "G": {},
+        "H": {},
+        "P": {},
+    },
     use_film=True,
     use_fourier=False,
 )
 
+# ── 3. Физика ─────────────────────────────────────────────────────────────────
 physics = LotkaVolterra(dim=1, has_time=False, device=device)
 physics.setParameters(
     params=[PARAMS],
@@ -100,6 +126,7 @@ physics.setParameters(
     initial=None,
 )
 
+# ── 4. PINN ───────────────────────────────────────────────────────────────────
 pinn = PINN(
     net, physics, samp,
     n_refine=1,
@@ -109,6 +136,7 @@ pinn = PINN(
     device=device,
 )
 
+# ── 5. Обучение ───────────────────────────────────────────────────────────────
 N_ITERS = 30000
 
 trainer = Trainer(
@@ -116,7 +144,7 @@ trainer = Trainer(
     lr=1e-3,
     n_iter=N_ITERS,
     resample_every=25,
-    checkpoint_every=500,
+    checkpoint_every=1000,
     gradnorm_every=200,
     param_every=100,
     lra_alpha=0.01,
@@ -128,14 +156,5 @@ trainer = Trainer(
     start_step=0,
 )
 
-print(f"=== Training ({N_ITERS} iterations) ===")
-# trainer.train()
-trainer.train_expanding_horizon(
-    T_target=30.0,
-    n_stages=8,
-    n_iter_per_stage=lambda k, N: 1500 + 1000 * (k - 1),
-)
-
-trainer.finetune_lbfgs(n_outer=50, max_iter=100, n_cycles=2)
-
-print(trainer.adaptive_weights)
+print(f"=== Обучение ({N_ITERS} итераций) ===")
+trainer.train()

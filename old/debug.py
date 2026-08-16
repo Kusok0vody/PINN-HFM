@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
-sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
+sys.path.append("src/")
 
 from geometry.geom             import Geometry
 from geometry.sampler          import Sampler
@@ -17,10 +17,12 @@ from pinn                      import PINN
 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device='cpu'
 if device != 'cpu':
     torch.cuda.set_device(device)
 print(device)
 
+# 1. Geometry
 N_bound = 8192
 N_wall = 2048
 N_pde = 8192
@@ -65,6 +67,7 @@ bounds = {
         "y": lambda p: p,
         "N": N_bound,
         "bc": {
+            # "u": {"type": "neumann"},
         }
     },
     "bottom": {
@@ -98,16 +101,17 @@ for name, b in pts.boundaries.items():
     print(f"  boundary '{name}': {b.coords.shape}")
 print()
 
+# plot_samples(pts, title="Test geometry")
 
+# 2. Network
 net = Net(
     x_dim=3, mu_dim=4,
     dx=64, dmu=32, d_h=64,
     encoder_layers=2,
     trunk_layers=3,
     head_layers=3,
-    film_layers=1,
     activation=nn.Tanh,
-    encoder_activation=ActivationFactory(Sine, omega=0.5, trainable=True),
+    encoder_activation=nn.Tanh,
     trunk_activation=ActivationFactory(Sine, omega=0.5, trainable=True),
     head_activation=nn.Tanh,
     film_activation=nn.Tanh,
@@ -116,21 +120,13 @@ net = Net(
         "px": {},
         "py": {},
     },
-    use_film=True,
+    use_film=False,
     use_fourier=False,
 )
 
-CHECKPOINT = "checkpoints/proppant_debug/ckpt_20100.pt"
-net, step = Trainer.load_checkpoint(
-    path=CHECKPOINT,
-)
-
-BETA_SCHEDULE   = torch.linspace(0.0, -2.5, 11).tolist()[1:]
-ITERS_SCHEDULE  = [2000]*10  
-
 print("=== Network ===")
-# print(net)
-# print()
+print(net)
+print()
 
 X  = torch.randn(10, 3)
 mu = torch.randn(3, 4)
@@ -140,6 +136,7 @@ for name, val in out.items():
 print()
 
 
+# 3. Physics
 rho_f = 1.0
 rho_p = 1.2
 g     = 0.0
@@ -151,7 +148,7 @@ r     = 0.65 * (rho_p - rho_f) / rho_f
 alpha = L / H
 
 parameters = [
-    {"alpha": alpha, "beta": -2.5, "r": r, "G": G},
+    {"alpha": alpha, "beta": 0.0, "r": r, "G": G},
 ]
 
 print(parameters)
@@ -173,12 +170,13 @@ print(f"  boundaries:  {list(physics.boundaries.keys())}")
 print()
 
 
+# 4. PINN
 pinn = PINN(
     net, physics, samp,
     n_refine=10,
     adaptive_pde=True,
-    adaptive_bc=False,
-    adaptive_ic=False,
+    adaptive_bc=True,
+    adaptive_ic=True,
     device=device
 )
 
@@ -195,8 +193,9 @@ print()
 print("Points shape: ", pinn.points.interior.coords.shape)
 
 
-n_iters = 5000
-start   = step
+# 5. Trainer
+n_iters = 20000
+start   = 0
 
 trainer = Trainer(
     pinn=pinn,
@@ -212,58 +211,17 @@ trainer = Trainer(
     start_step = start,
 )
 
+# Trainer.load_checkpoint(
+#     path="checkpoints/proppant_debug/ckpt_start.pt",
+#     pinn=pinn,
+#     optimiser=trainer.optimiser,
+#     scheduler=trainer.scheduler,
+#     device=device,
+# )
 
 print(f"=== Training ({n_iters} iterations) ===")
 trainer.train()
 print()
-
-# for stage, (beta, n_iter) in enumerate(zip(BETA_SCHEDULE, ITERS_SCHEDULE)):
-#     print(f"\n=== Stage {stage + 1}/{len(BETA_SCHEDULE)}: beta = {beta}  ({n_iter} iterations) ===")
-
-#     physics = proppantDynamics_dless(dim=2, has_time=True, device=device)
-#     physics.setParameters(
-#         params=[{"alpha": alpha, "beta": beta, "r": r, "G": G}],
-#         funcPar={"w": lambda x, y: torch.ones_like(x)},
-#         boundaries=bounds,
-#         initial={"c": lambda x, y: torch.zeros_like(x)},
-#     )
-
-#     pinn = PINN(
-#         net, physics, samp,
-#         n_refine=10,
-#         adaptive_pde=True,
-#         adaptive_bc=False,
-#         adaptive_ic=False,
-#         device=device,
-#     )
-
-#     trainer = Trainer(
-#         pinn=pinn,
-#         lr=1e-4,
-#         n_iter=n_iter,
-#         resample_every=1000,
-#         checkpoint_every=1000,
-#         gradnorm_every=200,
-#         lra_alpha=0.01,
-#         checkpoint_path="checkpoints",
-#         run_name=f"proppant_cont_beta{beta}",
-#         save_final=False,
-#         logger="tqdm",
-#         device=device,
-#         start_step=n_iter*(stage),
-#     )
-
-#     trainer.train()
-
-#     residuals = pinn.step()
-#     print(f"--- residuals after stage beta = {beta} ---")
-#     for group, res_dict in residuals.items():
-#         for name, res in res_dict.items():
-#             print(f"  {group}/{name}: mean={res.abs().mean().item():.6f}")
-
-trainer.finetune_lbfgs(n_outer=50, max_iter=100, n_cycles=1)
-
-print(trainer.adaptive_weights)
 
 print("=== Residuals ===")
 residuals = pinn.step()
@@ -277,5 +235,9 @@ for group, res_dict in residuals.items():
     print(f"  {group} total: {group_total:.6f}")
 print(f"lr: {trainer.optimiser.param_groups[0]['lr']:.2e}")
 
+# print("=== Checkpoint test ===")
+# step = trainer.load_checkpoint("checkpoints_test/ckpt_25.pt")
+# print(f"  loaded checkpoint at step {step}")
+# print()
 
 print("All tests passed!")

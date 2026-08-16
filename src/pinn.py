@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from src.utils import unpack_coords
+from utils import unpack_coords
 
 
 class PINN(nn.Module):
@@ -20,9 +20,9 @@ class PINN(nn.Module):
         adaptive_ic:  bool = False,
         device="cpu"
         ):
-        from src.geometry.sampler import Sampler, SampledPoints
-        from src.physics.phys import Physics
-        from src.network.net import Net
+        from geometry.sampler import Sampler, SampledPoints
+        from physics.phys import Physics
+        from network.net import Net
         
         super().__init__()
         self.net:Net               = net
@@ -50,7 +50,7 @@ class PINN(nn.Module):
         return torch.multinomial(weights / s, n, replacement=False)
 
     def resample_adaptive(self):
-        from src.geometry.sampler import SampledPoints, BoundaryBatch, CollocationBatch
+        from geometry.sampler import SampledPoints, BoundaryBatch, CollocationBatch
 
         for _ in (range(self.n_refine)):
             new_points = self.sampler.sample().to(self.device)
@@ -92,11 +92,11 @@ class PINN(nn.Module):
                         name=name,
                     )
 
-                    _, coords_bc = unpack_coords(
+                    unpacked, coords_bc = unpack_coords(
                         bc_combined, self.physics.has_time, self.physics.dim, requires_grad=True
                     )
                     pred_bc   = self.physics.apply_transforms(self.net(coords_bc, self.physics.par.tensor))
-                    res_bc    = self.physics.residualBC(pred_bc, coords_bc, combined_batch)
+                    res_bc    = self.physics.residualBC(pred_bc, unpacked, combined_batch)
 
                     sumres_bc = torch.zeros(len(bc_combined), device=self.device)
                     for _, res in res_bc.items():
@@ -119,7 +119,7 @@ class PINN(nn.Module):
                         self.points.initial.coords,
                         new_points.initial.coords
                     ])
-                    _, coords_ic = unpack_coords(
+                    unpacked, coords_ic = unpack_coords(
                         ic_combined, self.physics.has_time, self.physics.dim
                     )
                     pred_ic   = self.physics.apply_transforms(self.net(coords_ic, self.physics.par.tensor))
@@ -161,22 +161,24 @@ class PINN(nn.Module):
             self.points.interior.coords, self.physics.has_time, self.physics.dim, requires_grad=True
         )
         pred_pde   = self.physics.apply_transforms(self.net(coords_pde, parameters))
+        pred_pde   = self.physics.apply_output_ansatz(pred_pde, unpacked)
         res_pde    = self.physics.residualPDE(pred_pde, unpacked)
 
         # --- BC ---
         res_bc_raw = {}
         for _, batch in self.points.boundaries.items():
-            coords_dict, coords_bc = unpack_coords(
+            unpacked, coords_bc = unpack_coords(
                 batch.coords, self.physics.has_time, self.physics.dim, requires_grad=True
             )
             pred_bc   = self.physics.apply_transforms(self.net(coords_bc, parameters))
-            res_bc_raw.update(self.physics.residualBC(pred_bc, coords_dict, batch))
+            pred_bc = self.physics.apply_output_ansatz(pred_bc, unpacked)
+            res_bc_raw.update(self.physics.residualBC(pred_bc, unpacked, batch))
         res_bc = self.physics.apply_boundary_constraints(res_bc_raw)
 
         # --- IC ---
         res_ic = {}
         if self.points.initial is not None:
-            _, coords_ic = unpack_coords(
+            unpacked, coords_ic = unpack_coords(
                 self.points.initial.coords, self.physics.has_time, self.physics.dim
             )
             pred_ic   = self.physics.apply_transforms(self.net(coords_ic, parameters))

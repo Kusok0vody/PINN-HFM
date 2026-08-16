@@ -13,15 +13,16 @@ class Physics(ABC):
     """
 
     def __init__(self, device="cpu", dim=2, has_time=True):
-        self.device      = device
-        self.dim         = dim
-        self.has_time    = has_time
-        self.transforms  = {}
-        self.boundaries  = {}
-        self.initial     = {}
-        self.param_order = []
+        self.device        = device
+        self.dim           = dim
+        self.has_time      = has_time
+        self.transforms    = {}
+        self.boundaries    = {}
+        self.initial       = {}
+        self.param_order   = []
         self.par: ParamBatch = None
-        self.limits      = {}
+        self.limits        = {}
+        self.output_ansatz = {}
         
     def make_param_batch(self, par: list) -> ParamBatch:
         return ParamBatch.from_dict(
@@ -128,6 +129,14 @@ class Physics(ABC):
         """
         return {
             name: self.transforms[name](val) if name in self.transforms else val
+            for name, val in pred.items()
+        }
+        
+    def apply_output_ansatz(self, pred: dict, coords: dict) -> dict:
+        if not self.output_ansatz:
+            return pred
+        return {
+            name: self.output_ansatz[name](val, coords) if name in self.output_ansatz else val
             for name, val in pred.items()
         }
         

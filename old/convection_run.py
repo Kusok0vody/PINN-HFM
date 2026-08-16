@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
-sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
+sys.path.append("src/")
 
 from geometry.geom                 import Geometry
 from geometry.sampler              import Sampler
@@ -16,10 +16,12 @@ from pinn                          import PINN
 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device='cpu'
 if device != 'cpu':
     torch.cuda.set_device(device)
 print(device)
 
+# 1. Geometry
 N_bound = 1024
 N_pde   = 2048
 N_ic    = 2048
@@ -62,16 +64,17 @@ import matplotlib.pyplot as plt
 plot_samples(pts, title="Test geometry")
 plt.savefig("convection_geometry.png", bbox_inches="tight", dpi=150)
 
+# 2. Network
 net = Net(
     x_dim=2, mu_dim=1,
     dx=32, dmu=64, d_h=64,
     encoder_layers=3,
-    film_layers=1,
     trunk_layers=4,
     head_layers=3,
     activation=ActivationFactory(Sine, omega=1.0, trainable=True),
     encoder_activation=nn.Tanh,
     trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
+    # head_activation=nn.Tanh,
     head_activation=ActivationFactory(Sine, omega=1.0, trainable=True),
     film_activation=nn.Tanh,
     outputs_config={
@@ -88,17 +91,25 @@ for name, val in out.items():
     print(f"  out['{name}']: {val.shape}")
 print()
 
+# 3. Physics
 beta_min = 1.0
 beta_max = 20.0
 N_beta = 10
 
+# betas = torch.Tensor([0.01, 0.1, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 75.0, 100.0])
+# betas = torch.Tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+# betas = torch.Tensor([1.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 50.0])
+# betas = torch.Tensor([1.0, 50.0])
 betas = torch.linspace(beta_min, beta_max, N_beta)
 
 parameters = [
-    # {"beta": b.item()}
-    # for b in betas
-    {"beta": 5.0}
+    {"beta": b.item()}
+    for b in betas
 ]
+# beta_mean = 5
+# parameters = [
+#     {"beta": beta_mean},
+# ]
 
 limits = {
     "beta": {"min": beta_min, "max": beta_max, "N": N_beta, "scale": "linear"}
@@ -113,9 +124,10 @@ physics.setParameters(
     initial={
         "u": lambda x: torch.ones_like(x) + torch.sin(x),
     },
-    # limits=limits,
+    limits=limits,
 )
 
+# 4. PINN
 pinn = PINN(
     net, physics, samp,
     n_refine=10,
@@ -134,6 +146,7 @@ for group, res_dict in residuals.items():
 print()
 print("Points shape: ", pinn.points.interior.coords.shape)
 
+# 5. Trainer
 n_iters = 20000
 start   = 0
 
@@ -147,13 +160,20 @@ trainer = Trainer(
     param_every=500,
     lra_alpha=0.01,
     checkpoint_path="checkpoints",
-    run_name="convection",
+    run_name="convect",
     save_final=False,
     logger="tqdm",
     device=device,
     start_step = start,
 )
 
+# Trainer.load_checkpoint(
+#     path="checkpoints/proppant_debug/ckpt_start.pt",
+#     pinn=pinn,
+#     optimiser=trainer.optimiser,
+#     scheduler=trainer.scheduler,
+#     device=device,
+# )
 
 print(f"=== Training ({n_iters} iterations) ===")
 trainer.train()
@@ -165,3 +185,5 @@ for group, res_dict in residuals.items():
     for name, res in res_dict.items():
         print(f"  {group}/{name}: {res.shape}  mean={res.abs().mean().item():.4f}")
 print()
+
+print("Points shape: ", pinn.points.interior.coords.shape)
