@@ -1,8 +1,8 @@
 import torch
 
-from src.physics.phys import Physics
-from src.utils import derivative_batched
-from src.geometry.sampler import BoundaryBatch
+from physics.phys import Physics
+from utils import derivative_batched
+from geometry.sampler import BoundaryBatch
 
 
 class helmholtz2D_annulus(Physics):

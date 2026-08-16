@@ -64,6 +64,7 @@ class PINN(nn.Module):
                     pde_combined, self.physics.has_time, self.physics.dim, requires_grad=True
                 )
                 pred_pde   = self.physics.apply_transforms(self.net(coords_pde, self.physics.par.tensor))
+                pred_pde   = self.physics.apply_output_ansatz(pred_pde, unpacked)
                 res_pde    = self.physics.residualPDE(pred_pde, unpacked)
                 sumres_pde = torch.zeros(len(pde_combined), device=self.device)
                 for _, res in res_pde.items():
@@ -96,6 +97,7 @@ class PINN(nn.Module):
                         bc_combined, self.physics.has_time, self.physics.dim, requires_grad=True
                     )
                     pred_bc   = self.physics.apply_transforms(self.net(coords_bc, self.physics.par.tensor))
+                    pred_bc   = self.physics.apply_output_ansatz(pred_bc, unpacked)
                     res_bc    = self.physics.residualBC(pred_bc, unpacked, combined_batch)
 
                     sumres_bc = torch.zeros(len(bc_combined), device=self.device)
@@ -123,6 +125,7 @@ class PINN(nn.Module):
                         ic_combined, self.physics.has_time, self.physics.dim
                     )
                     pred_ic   = self.physics.apply_transforms(self.net(coords_ic, self.physics.par.tensor))
+                    pred_ic   = self.physics.apply_output_ansatz(pred_ic, unpacked)
                     res_ic    = self.physics.residualIC(pred_ic, coords_ic)
                     sumres_ic = torch.zeros(len(ic_combined), device=self.device)
                     for _, res in res_ic.items():
@@ -182,6 +185,7 @@ class PINN(nn.Module):
                 self.points.initial.coords, self.physics.has_time, self.physics.dim
             )
             pred_ic   = self.physics.apply_transforms(self.net(coords_ic, parameters))
+            pred_ic   = self.physics.apply_output_ansatz(pred_ic, unpacked)
             res_ic    = self.physics.residualIC(pred_ic, coords_ic)
 
         # --- Extra ---

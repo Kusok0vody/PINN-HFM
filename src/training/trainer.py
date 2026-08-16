@@ -179,7 +179,6 @@ class Trainer:
         """
         from network.net import Net
         
-        print(path)
         ckpt = torch.load(path, map_location=device, weights_only=False)
 
         if pinn is None:

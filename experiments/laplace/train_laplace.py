@@ -63,6 +63,7 @@ net = Net(
     encoder_layers=3,
     trunk_layers=4,
     head_layers=3,
+    film_layers=2,
     activation=ActivationFactory(Sine, omega=1.0, trainable=False),
     encoder_activation=nn.Tanh,
     trunk_activation=ActivationFactory(Sine, omega=1.0, trainable=False),
