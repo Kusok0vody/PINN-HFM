@@ -5,13 +5,15 @@ import torch.nn as nn
 
 sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
 
-from geometry.geom                import Geometry
-from geometry.sampler             import Sampler
-from network.net                  import Net
-from network.activations          import ActivationFactory, Sine
+from geometry.geom              import Geometry
+from geometry.sampler           import Sampler
+from network.net                import Net
+from network.activations        import ActivationFactory, Sine
 from physics.problems.helmholtz import helmholtz2D_annulus
-from training.trainer             import Trainer
-from pinn                         import PINN
+from training.trainer           import Trainer
+from pinn                       import PINN
+from validation.validator       import Validator
+from validation.references      import helmholtz_annulus, helmholtz_annulus_resonances
 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -19,8 +21,10 @@ if device.type != "cpu":
     torch.cuda.set_device(device)
 print(f"Device: {device}")
 
-R = 3.0
-r = 1.0
+# --- Geometry: annulus, u = 0 inside, alternating +/-1 over N_ARCS arcs outside ---
+R      = 3.0
+r      = 1.0
+N_ARCS = 8
 
 N_r   = 128
 N_R   = 64
@@ -28,9 +32,9 @@ N_PDE = 4096
 
 bounds = {}
 
-for i in range(8):
-    p_start = i / 8.0
-    p_end   = (i + 1) / 8.0
+for i in range(N_ARCS):
+    p_start = i / N_ARCS
+    p_end   = (i + 1) / N_ARCS
     bounds[f"rq{i+1}"] = {
         "p": [p_start, p_end],
         "x": lambda p, r=r: r * torch.cos(2 * math.pi * p),
@@ -41,10 +45,10 @@ for i in range(8):
         },
     }
 
-for i in range(8):
-    p_start = i / 8.0
-    p_end   = (i + 1) / 8.0
-    value = 1.0 if (i % 2 == 0) else -1.0
+for i in range(N_ARCS):
+    p_start = i / N_ARCS
+    p_end   = (i + 1) / N_ARCS
+    value   = 1.0 if (i % 2 == 0) else -1.0
     bounds[f"Rq{i+1}"] = {
         "p": [p_start, p_end],
         "x": lambda p, R=R: R * torch.cos(2 * math.pi * p),
@@ -63,6 +67,23 @@ print(f"interior: {pts.interior.coords.shape}")
 for name, b in pts.boundaries.items():
     print(f"boundary '{name}': {b.coords.shape}")
 
+# --- Parameter sweep, steering clear of the Dirichlet eigenvalues -------------
+K_MIN = 1.0
+K_MAX = 12.0
+N_K   = 4
+
+bad = helmholtz_annulus_resonances(K_MIN, K_MAX, r, R, N_ARCS)
+print(f"resonant k in [{K_MIN}, {K_MAX}]: {[round(v, 3) for v in bad]}")
+
+ks = torch.linspace(K_MIN, K_MAX, N_K)
+for k_bad in bad:
+    if (ks - k_bad).abs().min() < 0.2:
+        print(f"  WARNING: sweep point within 0.2 of the resonance at k = {k_bad:.3f}")
+
+parameters = [{"k": k.item()} for k in ks]
+limits     = {"k": {"min": K_MIN, "max": K_MAX, "N": N_K, "scale": "linear"}}
+print(f"parameters: {parameters}")
+
 net = Net(
     x_dim=2, mu_dim=1,
     dx=32, dmu=64, d_h=64,
@@ -80,20 +101,11 @@ net = Net(
     use_fourier=False,
 )
 
-K_MIN = 1.0
-K_MAX = 10.0
-N_K   = 2
-
-ks = torch.linspace(K_MIN, K_MAX, N_K)
-parameters = [{"k": k.item()} for k in ks]
-parameters = [{"k": 10}]
-limits = {"k": {"min": K_MIN, "max": K_MAX, "N": N_K, "scale": "linear"}}
-
 physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
 physics.setParameters(
     params=parameters,
     boundaries=bounds,
-    initial=None,
+    limits=limits,
 )
 
 pinn = PINN(
@@ -105,6 +117,39 @@ pinn = PINN(
     device=device,
 )
 
+# --- Analytic reference on a polar grid, one block per sweep point ------------
+N_RHO, N_THETA = 64, 128
+rho_grid = torch.linspace(r, R, N_RHO)
+th_grid  = torch.linspace(0.0, 2 * math.pi, N_THETA + 1)[:-1]
+RHO, TH  = torch.meshgrid(rho_grid, th_grid, indexing="ij")
+
+ref_x = (RHO * torch.cos(TH)).reshape(-1)
+ref_y = (RHO * torch.sin(TH)).reshape(-1)
+
+# Geometry stores 2D coordinates as (y, x) — see Geometry.COORD_ORDER
+ref_coords = torch.stack([ref_y, ref_x], dim=1)
+ref_u = torch.stack(
+    [
+        torch.as_tensor(
+            helmholtz_annulus(ref_x.numpy(), ref_y.numpy(), p["k"], r, R, N_ARCS),
+            dtype=torch.float32,
+        )
+        for p in parameters
+    ],
+    dim=1,
+)
+print(f"reference block: {tuple(ref_u.shape)}  max|u| = {ref_u.abs().max():.3f}")
+
+validator = Validator(
+    pinn,
+    ref_coords=ref_coords,
+    ref_values={"u": ref_u},
+    ref_params=physics.par.tensor.clone(),
+    seed=0,
+)
+print(f"metrics before training: "
+      f"{ {key: round(val, 5) for key, val in validator.evaluate().items()} }")
+
 N_ITERS = 20000
 
 trainer = Trainer(
@@ -112,7 +157,7 @@ trainer = Trainer(
     lr=1e-3,
     n_iter=N_ITERS,
     resample_every=1000,
-    checkpoint_every=100,
+    checkpoint_every=1000,
     gradnorm_every=200,
     lra_alpha=0.01,
     checkpoint_path="checkpoints",
@@ -121,7 +166,13 @@ trainer = Trainer(
     logger="tqdm",
     device=device,
     start_step=0,
+    validator=validator,
+    validate_every=200,
 )
 
 print(f"=== Training ({N_ITERS} iterations) ===")
 trainer.train()
+
+print("=== Final metrics ===")
+for name, val in validator.evaluate().items():
+    print(f"  {name}: {val:.6e}")

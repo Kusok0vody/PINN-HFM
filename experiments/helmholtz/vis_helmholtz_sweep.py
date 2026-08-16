@@ -41,7 +41,7 @@ print(f"Step: {step}")
 results = {}
 for k in KS:
     physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
-    physics.setParameters(params=[{"k": k}], boundaries={}, initial=None)
+    physics.setParameters(params=[{"k": k}], boundaries={})
     with torch.no_grad():
         raw = net(coords, physics.par.tensor)
     u = raw["u"].squeeze(1).cpu().numpy().reshape(N, N)

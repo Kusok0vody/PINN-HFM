@@ -12,6 +12,7 @@ os.makedirs("gifs", exist_ok=True)
 
 from physics.problems.convection1D import convection1D
 from training.trainer import Trainer
+from validation.metrics import relative_l2
 
 
 def make_param_sweep_gif(
@@ -54,8 +55,7 @@ def make_param_sweep_gif(
         if exact_fn is not None:
             u_exact = exact_fn(pdict).reshape(output_shape)
             u_err   = np.abs(u_pred - u_exact)
-            l2_rel  = (np.linalg.norm(u_pred - u_exact)
-                       / (np.linalg.norm(u_exact) + 1e-12))
+            l2_rel  = relative_l2(u_pred, u_exact)
         else:
             u_exact = None
             u_err   = None

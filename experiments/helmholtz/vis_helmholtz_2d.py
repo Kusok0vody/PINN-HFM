@@ -12,9 +12,13 @@ os.makedirs("images", exist_ok=True)
 
 from physics.problems.helmholtz import helmholtz2D_annulus
 from training.trainer import Trainer
+from validation.references import helmholtz_annulus
+from validation.metrics import relative_l2
+from visualization.fields import plot_field
 
 CHECKPOINT = "checkpoints/helmholtz/ckpt_20000.pt"
 OUTPUT_PNG = "images/helmholtz_2d.png"
+ERROR_PNG  = "images/helmholtz_2d_error.png"
 K_PLOT     = 1.0
 N          = 700
 R          = 3.0
@@ -31,19 +35,38 @@ YY, XX = torch.meshgrid(ys, xs, indexing="ij")
 coords = torch.cat([YY.reshape(-1, 1), XX.reshape(-1, 1)], dim=1).to(device)
 
 rr = (XX**2 + YY**2).numpy()
-mask_annulus = (rr <= R**2 + 1e-4)
+# The domain is an annulus: the inner disk is a hole, not part of the solution.
+mask_annulus = (rr <= R**2 + 1e-4) & (rr >= r**2 - 1e-4)
 
 net, step = Trainer.load_checkpoint(path=CHECKPOINT, device=device)
 net.eval()
 print(f"Step: {step}")
 
 physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
-physics.setParameters(params=[{"k": K_PLOT}], boundaries={}, initial=None)
+physics.setParameters(params=[{"k": K_PLOT}], boundaries={})
 
 with torch.no_grad():
-    raw = net(coords, physics.par.tensor)
-u = raw["u"].squeeze(1).cpu().numpy().reshape(N, N)
+    pred = physics.apply_transforms(net(coords, physics.par.tensor))
+u = pred["u"].squeeze(1).cpu().numpy().reshape(N, N)
 u_masked = np.where(mask_annulus, u, np.nan)
+
+# --- Analytic reference, compared on the annulus only ------------------------
+u_exact = helmholtz_annulus(XX.numpy(), YY.numpy(), K_PLOT, r, R, n_arcs=8)
+inside  = mask_annulus
+l2_rel  = relative_l2(u[inside], u_exact[inside])
+print(f"k = {K_PLOT}:  L2 relative error = {l2_rel:.4f}")
+
+plot_field(
+    np.abs(u - u_exact),
+    x_range=(-R, R), y_range=(-R, R),
+    title=rf"$|u_{{\mathrm{{PINN}}}} - u_{{\mathrm{{exact}}}}|$,  $k = {K_PLOT}$,  "
+          rf"$L_2^{{rel}} = {l2_rel:.4f}$",
+    label="absolute error",
+    cmap="magma",
+    mask=inside,
+    output_path=ERROR_PNG,
+)
+print(f"Saved --> {ERROR_PNG}")
 
 vabs = np.nanpercentile(np.abs(u_masked), 99)
 vmin, vmax = -vabs, vabs

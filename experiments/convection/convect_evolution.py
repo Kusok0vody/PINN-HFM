@@ -14,6 +14,7 @@ os.makedirs("gifs", exist_ok=True)
 
 from physics.problems.convection1D import convection1D
 from training.trainer import Trainer
+from validation.metrics import relative_l2
 
 CHECKPOINT_DIR = "checkpoints/convection"
 CHECKPOINT_STEP = 100
@@ -137,7 +138,7 @@ def get_predictions(step):
         ph = physics_list[beta]
         u_pred  = predict(net, ph)
         u_exact = exact[beta]
-        l2 = np.linalg.norm(u_pred - u_exact) / np.linalg.norm(u_exact)
+        l2 = relative_l2(u_pred, u_exact)
         preds[beta] = (u_pred, l2)
     cache[step] = preds
     return preds

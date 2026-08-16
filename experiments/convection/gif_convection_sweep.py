@@ -13,6 +13,7 @@ os.makedirs("gifs", exist_ok=True)
 
 from physics.problems.convection1D import convection1D
 from training.trainer import Trainer
+from validation.metrics import relative_l2
 
 CHECKPOINT   = "checkpoints/convection/ckpt_20000.pt"
 OUTPUT_GIF   = "gifs/convection_beta_sweep.gif"
@@ -64,7 +65,7 @@ def compute_frame(beta_val):
     u_pred  = pred["u"].squeeze(1).cpu().reshape(N_TIME, N_GRID).numpy()
     u_exact = 1.0 + np.sin(XX_np - beta_val * TT_np)
     u_err   = np.abs(u_pred - u_exact)
-    l2_rel  = np.linalg.norm(u_pred - u_exact) / np.linalg.norm(u_exact)
+    l2_rel  = relative_l2(u_pred, u_exact)
     return u_pred, u_exact, u_err, l2_rel
 
 print(f"Compute {len(set(BETAS_SWEEP))} unique betas...")

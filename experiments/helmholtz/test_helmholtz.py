@@ -33,7 +33,6 @@ physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
 physics.setParameters(
     params=parameters,
     boundaries={},
-    initial=None
 )
 
 with torch.no_grad():
@@ -67,7 +66,7 @@ plt.gca().set_aspect("equal")
 circle2 = plt.Circle((0, 0), R, color="black", fill=False, linewidth=1)
 plt.gca().add_patch(circle2)
 
-plt.savefig("pinn_laplace_ring.png", bbox_inches="tight", dpi=300)
+plt.savefig("helmholtz_annulus.png", bbox_inches="tight", dpi=300)
 plt.show()
 
-print("Saved --> pinn_laplace_ring.png")
+print("Saved --> helmholtz_annulus.png")

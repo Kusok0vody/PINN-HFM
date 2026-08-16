@@ -10,16 +10,14 @@ class Trainer:
 
     Responsibilities:
         - optimiser and lr-scheduler
-        - loss aggregation from residuals with per-residual weights
+        - loss aggregation from residuals with GradNorm-balanced weights
         - logging via tqdm + tensorboard
         - checkpointing (net state_dict + optimiser + sampled points)
         - calling resample() every resample_every iterations
+        - out-of-sample validation via an optional Validator
 
     Args:
         pinn:             PINN instance
-        mu_list:          list of parameter dicts [{"alpha": 1.0, ...}, ...]
-        weights:          per-residual weights, e.g. {"convection": 1.0, "pde": 1.0}
-                          lookup order: exact name -> group name -> 1.0
         lr:               initial learning rate
         n_iter:           number of training iterations
         resample_every:   resample collocation points every K iterations
@@ -27,6 +25,11 @@ class Trainer:
         checkpoint_path:  directory for checkpoints
         logger:           "tqdm" or "tensorboard"
         device:           "cpu" or "cuda"
+        gradnorm_every:   rebalance loss weights every K iterations
+        lra_alpha:        EMA rate for the loss-weight update
+        param_every:      resample physics parameters every K iterations (0 = never)
+        validator:        Validator instance, or None to skip validation
+        validate_every:   run the validator every K iterations (0 = never)
     """
 
     def __init__(
@@ -45,6 +48,8 @@ class Trainer:
         gradnorm_every:   int   = 200,
         lra_alpha:        float = 0.01,
         param_every:      int   = 0,
+        validator               = None,
+        validate_every:   int   = 0,
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -67,6 +72,10 @@ class Trainer:
         }
         self._weights_initialized = False
         self.param_every = param_every
+
+        self.validator      = validator
+        self.validate_every = validate_every
+        self.last_metrics   = {}
 
         self.optimiser = torch.optim.NAdam(
             pinn.net.parameters(),
@@ -151,6 +160,23 @@ class Trainer:
             for name, val in loss_terms.items():
                 self.writer.add_scalar(f"loss/{name}", val, step)
 
+    def _validate(self, step: int) -> dict:
+        """
+        Runs the validator and logs its metrics under "val/".
+
+        Unlike the training loss these are out-of-sample: the holdout pool and
+        the parameter batch are frozen inside the Validator, so the numbers are
+        comparable across steps and across runs.
+        """
+        metrics = self.validator.evaluate()
+        self.last_metrics = metrics
+
+        if self.logger_type == "tensorboard" and self.writer is not None:
+            for name, val in metrics.items():
+                self.writer.add_scalar(f"val/{name}", val, step)
+
+        return metrics
+
     def _save_checkpoint(self, step: int):
         os.makedirs(self.checkpoint_path, exist_ok=True)
         torch.save(
@@ -227,10 +253,20 @@ class Trainer:
 
             self._log(step, loss_terms, total.item())
 
-            pbar.set_postfix({
+            if (self.validator is not None and self.validate_every > 0
+                    and step % self.validate_every == 0):
+                self._validate(step)
+
+            postfix = {
                 "loss": f"{total.item():.3e}",
                 "lr":   f"{self.optimiser.param_groups[0]['lr']:.2e}",
-            })
+            }
+            for name, val in self.last_metrics.items():
+                if name.startswith("l2/"):
+                    postfix[name] = f"{val:.3e}"
+                elif name == "holdout/total":
+                    postfix["holdout"] = f"{val:.3e}"
+            pbar.set_postfix(postfix)
 
             if step % self.checkpoint_every == 0:
                 self._save_checkpoint(step)

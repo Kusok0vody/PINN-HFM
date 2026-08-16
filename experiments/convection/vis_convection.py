@@ -8,6 +8,7 @@ sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / 
 
 from physics.problems.convection1D import convection1D
 from training.trainer import Trainer
+from validation.metrics import relative_l2
 
 N_grid = 200
 N_time = 200
@@ -49,9 +50,7 @@ u_pred = pred["u"].squeeze(1).cpu().reshape(N_time, N_grid).numpy()
 beta = parameters[0]["beta"]
 u_exact = 1.0 + np.sin(XX.numpy() - beta * TT.numpy())
 
-u_pred_flat = u_pred.flatten()
-u_exact_flat = u_exact.flatten()
-l2_rel = np.linalg.norm(u_pred_flat - u_exact_flat) / np.linalg.norm(u_exact_flat)
+l2_rel = relative_l2(u_pred, u_exact)
 print(f"L2 relative error: {l2_rel:.4f}")
 
 cmap = "rainbow"

@@ -10,6 +10,7 @@ os.makedirs("images", exist_ok=True)
 
 from physics.problems.lotka_volterra import LotkaVolterra
 from training.trainer                import Trainer
+from validation.metrics              import relative_l2, max_abs_error
 
 CHECKPOINT = "checkpoints/lotka_volterra/ckpt_61607.pt"
 OUTPUT_PNG = "images/lotka_volterra.png"
@@ -69,6 +70,16 @@ try:
     H_ref = sol.y[1]
     P_ref = sol.y[2]
     has_ref = True
+
+    for name, pinn_vals, ref_vals in (("G", G_pinn, G_ref),
+                                      ("H", H_pinn, H_ref),
+                                      ("P", P_pinn, P_ref)):
+        print(f"{name}: L2 relative error = {relative_l2(pinn_vals, ref_vals):.4f}   "
+              f"max |error| = {max_abs_error(pinn_vals, ref_vals):.4f}")
+
+    stacked_pinn = np.stack([G_pinn, H_pinn, P_pinn])
+    stacked_ref  = np.stack([G_ref, H_ref, P_ref])
+    print(f"overall: L2 relative error = {relative_l2(stacked_pinn, stacked_ref):.4f}")
 except ImportError:
     has_ref = False
     print("scipy not found, skipping reference solution")

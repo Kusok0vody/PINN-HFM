@@ -142,6 +142,32 @@ class PINN(nn.Module):
                 initial=CollocationBatch(coords=initial) if initial is not None else None,
             ).to(self.device)
 
+    def predict(self, coords: torch.Tensor, params: torch.Tensor = None,
+                requires_grad: bool = False) -> dict:
+        """
+        Forward pass with output transforms and the hard-constraint ansatz applied.
+
+        This is what any consumer of a trained network should call: the raw
+        net(...) output is pre-transform and pre-ansatz, and is therefore not
+        the solution of the problem.
+
+        Args:
+            coords:        (N, n_coords)
+            params:        (M, mu_dim); defaults to the current physics parameters
+            requires_grad: keep the graph on the coordinate columns, so the
+                           caller can differentiate the prediction
+
+        Returns:
+            dict: name -> (N, M)
+        """
+        params = self.physics.par.tensor if params is None else params
+
+        unpacked, coords_out = unpack_coords(
+            coords, self.physics.has_time, self.physics.dim, requires_grad=requires_grad
+        )
+        pred = self.physics.apply_transforms(self.net(coords_out, params))
+        return self.physics.apply_output_ansatz(pred, unpacked)
+
     def step(self) -> dict:
         """
         Computes all residuals for a given parameter batch.
