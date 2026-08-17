@@ -41,7 +41,6 @@ from geometry.sampler import Sampler
 from network.net import Net
 from physics.problems.helmholtz import helmholtz2D_annulus
 from pinn import PINN
-from utils import unpack_coords
 from validation.metrics import relative_l2, max_abs_error
 from validation.references import helmholtz_annulus, helmholtz_annulus_resonances
 
@@ -65,6 +64,29 @@ def build_bounds():
                 "bc": {"u": {"type": "dirichlet", "value": fn}},
             }
     return bounds
+
+
+def pde_residual(pinn, coords, mu, chunk):
+    """
+    Residual of the equation on a grid, in chunks.
+
+    Two things make this the memory hot spot of the whole script. The residual
+    is second order, so its graph is retained through create_graph, and it is
+    evaluated on a plotting grid — tens of thousands of points, an order more
+    than a training batch. At ten parameter settings that combination reached
+    69 GB on an 80 GB card in one go.
+
+    Chunking bounds it at whatever a chunk costs, and going through
+    pinn._evaluate rather than unpack_coords means the residual is computed by
+    the same path the training loop uses, paired coordinates included.
+    """
+    out = []
+    for i in range(0, coords.shape[0], chunk):
+        unpacked, pred = pinn._evaluate(coords[i:i + chunk], mu)
+        res = pinn.physics.residualPDE(pred, unpacked)["helmholtz"]
+        out.append(res.detach().cpu())
+        del unpacked, pred, res
+    return torch.cat(out, dim=0)
 
 
 def resolve_checkpoint(spec):
@@ -193,6 +215,13 @@ def main():
                          "into this directory (default 'figures')")
     ap.add_argument("--plot-n", type=int, default=401,
                     help="cartesian resolution of the figure")
+    ap.add_argument("--jump-bins", type=int, default=6,
+                    help="bins of the outer-ring error profile, from a jump in "
+                         "the boundary datum to the middle of an arc")
+    ap.add_argument("--res-chunk", type=int, default=2048,
+                    help="points per chunk when computing the PDE residual; the "
+                         "second-order graph is what fills the card, so lower "
+                         "this before lowering the grid")
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -226,18 +255,17 @@ def main():
     # The checkpoint carries its own input rescaling; recomputing it here would
     # overwrite the map the weights were trained under whenever this script's
     # sampler or limits differ from the training script's by anything at all.
-    pinn = PINN(net, physics, samp, autoscale_inputs=False, device=device)
+    # Paired coordinates for the residual: one backward instead of one per
+    # setting, which is the difference between fitting on the card and not.
+    pinn = PINN(net, physics, samp, autoscale_inputs=False,
+                paired_coords=True, device=device)
 
     coords, rho, gx, gy = polar_grid(args.n_rho, args.n_theta, device)
     mu = torch.tensor([[k] for k in args.k], dtype=torch.float32, device=device)
 
     # The residual needs the graph on the coordinates, so it cannot sit inside
     # no_grad; the reference error can and does.
-    unpacked, coords_g = unpack_coords(coords, False, 2, requires_grad=True)
-    pred_g = physics.apply_output_ansatz(
-        physics.apply_transforms(net(coords_g, mu)), unpacked
-    )
-    res = physics.residualPDE(pred_g, unpacked)["helmholtz"].detach().cpu()
+    res = pde_residual(pinn, coords, mu, args.res_chunk)
 
     with torch.no_grad():
         pred = pinn.predict(coords, mu)["u"].cpu()
@@ -248,6 +276,13 @@ def main():
         u_in  = pinn.predict(inner, mu)["u"].cpu()
         u_out = pinn.predict(outer, mu)["u"].cpu()
     g_out = torch.where(torch.sin((N_ARCS // 2) * th_o) >= 0, 1.0, -1.0).unsqueeze(1)
+
+    arc       = 2 * math.pi / N_ARCS
+    to_jump   = (th_o + arc / 2) % arc - arc / 2      # signed distance to nearest jump
+    # Equal-width bins from a jump to the middle of an arc. Equal width rather
+    # than equal count so that the horizontal axis is angle and the profile can
+    # be read as a decay rate.
+    bin_edges = torch.linspace(0.0, arc / 2, args.jump_bins + 1)
 
     bands = [(r, 1.5), (1.5, 2.5), (2.5, 2.9), (2.9, R)]
     print()
@@ -275,6 +310,29 @@ def main():
         e_out = u_out[:, j] - g_out[:, 0]
         print(f"  outer ring |u - g|   max {e_out.abs().max():.4f}"
               f"  rms {e_out.pow(2).mean().sqrt():.4f}      (target +/-1)")
+        # Where on the ring that error sits. The outer datum steps between +1
+        # and -1 at n_arcs points, and no smooth function follows a step, so a
+        # band around each jump is wrong by O(1) whatever the training did.
+        # Spread over the whole ring that alone yields an rms of a few tenths,
+        # which the line above cannot tell apart from a boundary the network
+        # genuinely failed to fit.
+        #
+        # Reported as a profile rather than as a masked number on purpose: a
+        # cutoff chosen after seeing the result decides the answer by itself.
+        # Here nothing is excluded and no threshold is picked — the shape
+        # answers the question. Concentrated at 0 and decaying: the jumps, and
+        # nothing to fix. Flat across the arc: a real underfit of the boundary,
+        # present at every k including those where the solution is of size one
+        # and nothing is being damped.
+        print("  outer ring |u - g| by angular distance to the nearest jump:")
+        for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+            m = (to_jump.abs() >= lo) & (to_jump.abs() < hi)
+            if m.sum() == 0:
+                continue
+            e = e_out[m]
+            print(f"    {math.degrees(lo):5.1f}-{math.degrees(hi):4.1f} deg  "
+                  f"n {int(m.sum()):4d}   rms {e.pow(2).mean().sqrt():.4f}"
+                  f"   max {e.abs().max():.4f}")
         print("  by radius:")
         for lo, hi in bands:
             m = (rho >= lo) & (rho < hi + (1e-6 if hi == R else 0.0))

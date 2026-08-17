@@ -78,6 +78,7 @@ net = Net(
     use_film=True,
     film_layers=1,
     use_fourier=False,
+    output_scaling=True,
 )
 
 K_MIN = 1.0
@@ -103,10 +104,11 @@ pinn = PINN(
     adaptive_bc=False,
     adaptive_ic=False,
     paired_coords=True,
+    scale_free_pde=True,
     device=device,
 )
 
-N_ITERS = 20000
+N_ITERS = 30000
 
 trainer = Trainer(
     pinn=pinn,
