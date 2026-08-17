@@ -68,21 +68,33 @@ for name, b in pts.boundaries.items():
     print(f"boundary '{name}': {b.coords.shape}")
 
 # --- Parameter sweep, steering clear of the Dirichlet eigenvalues -------------
+# The range stops below the first eigenvalue of this annulus at k = 6.513. It
+# used to run to 12 with four sweep points, which happened to miss the
+# resonance by 1.8; sixteen points over that range pass within 0.35 of it, and
+# a solution that close has amplitude 9.8 against a median of 2.0, so its
+# residual takes over the loss. Narrowing the range is what makes a denser
+# sweep possible at all.
 K_MIN = 1.0
-K_MAX = 12.0
-N_K   = 4
+K_MAX = 6.0
+N_K   = 16
 
 bad = helmholtz_annulus_resonances(K_MIN, K_MAX, r, R, N_ARCS)
-print(f"resonant k in [{K_MIN}, {K_MAX}]: {[round(v, 3) for v in bad]}")
-
-ks = torch.linspace(K_MIN, K_MAX, N_K)
-for k_bad in bad:
-    if (ks - k_bad).abs().min() < 0.2:
-        print(f"  WARNING: sweep point within 0.2 of the resonance at k = {k_bad:.3f}")
+ks  = torch.linspace(K_MIN, K_MAX, N_K)
+if bad:
+    nearest = min((ks - b).abs().min().item() for b in bad)
+    print(f"resonant k in [{K_MIN}, {K_MAX}]: {[round(v, 3) for v in bad]}, "
+          f"nearest sweep point {nearest:.3f} away")
+    if nearest < 0.5:
+        raise SystemExit(
+            "A sweep point sits on a Dirichlet eigenvalue: the solution there is "
+            "unbounded and its residual will dominate every other setting. "
+            "Narrow K_MIN/K_MAX or reduce N_K."
+        )
+else:
+    print(f"sweep k in [{K_MIN}, {K_MAX}] with {N_K} points, no resonances inside")
 
 parameters = [{"k": k.item()} for k in ks]
 limits     = {"k": {"min": K_MIN, "max": K_MAX, "N": N_K, "scale": "linear"}}
-print(f"parameters: {parameters}")
 
 net = Net(
     x_dim=2, mu_dim=1,
@@ -138,7 +150,11 @@ ref_u = torch.stack(
     ],
     dim=1,
 )
-print(f"reference block: {tuple(ref_u.shape)}  max|u| = {ref_u.abs().max():.3f}")
+amps = ref_u.abs().amax(dim=0)
+print(f"reference block: {tuple(ref_u.shape)}  max|u| = {ref_u.abs().max():.3f}, "
+      f"median over k = {amps.median():.3f}")
+print(f"derivative path: {'paired' if pinn.paired_coords else 'broadcast'}, "
+      f"M = {physics.par.tensor.shape[0]} parameter settings")
 
 validator = Validator(
     pinn,
@@ -168,6 +184,7 @@ trainer = Trainer(
     start_step=0,
     validator=validator,
     validate_every=200,
+    log_every=N_ITERS // 40,
 )
 
 print(f"=== Training ({N_ITERS} iterations) ===")

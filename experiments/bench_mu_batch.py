@@ -47,7 +47,7 @@ from physics.problems.proppant import proppantDynamics_dless
 from pinn import PINN
 from training.trainer import Trainer
 from validation.metrics import relative_l2, residual_norms
-from validation.references import helmholtz_annulus
+from validation.references import helmholtz_annulus, helmholtz_annulus_resonances
 
 
 def log(msg):
@@ -58,7 +58,12 @@ def log(msg):
 
 def setup_helmholtz(args, device):
     R, r, n_arcs = 3.0, 1.0, 8
-    k_min, k_max = 1.0, 12.0
+    # The default range stops below the first Dirichlet eigenvalue of this
+    # annulus, at k = 6.513. Straddling it looks harmless at small M and is not:
+    # the sweep points crowd towards the resonance as M grows, and a solution
+    # sitting 0.17 away from it has amplitude 20 against a median of 1.9, so its
+    # residual swamps the loss and the comparison stops being about M at all.
+    k_min, k_max = args.k_min, args.k_max
     bounds = {}
     for i in range(n_arcs):
         for tag, rad, val in (("rq", r, None), ("Rq", R, 1.0 if i % 2 == 0 else -1.0)):
@@ -78,9 +83,20 @@ def setup_helmholtz(args, device):
     th  = torch.linspace(0, 2 * math.pi, 81)[:-1]
     RHO, TH = torch.meshgrid(rho, th, indexing="ij")
     rx, ry = (RHO * torch.cos(TH)).reshape(-1), (RHO * torch.sin(TH)).reshape(-1)
+    bad = helmholtz_annulus_resonances(k_min, k_max, r, R, n_arcs)
+    if bad:
+        log(f"WARNING resonances inside [{k_min}, {k_max}]: "
+            f"{[round(v, 3) for v in bad]} — solutions there are unbounded and "
+            f"will dominate whichever arm samples closest to them")
+    else:
+        log(f"sweep k in [{k_min}, {k_max}], no resonances inside")
+
     grid = torch.linspace(k_min, k_max, 9)
     ref  = [torch.as_tensor(helmholtz_annulus(rx.numpy(), ry.numpy(), k, r, R, n_arcs),
                             dtype=torch.float32) for k in grid.tolist()]
+    amps = [float(v.abs().max()) for v in ref]
+    log(f"reference amplitude over the evaluation grid: "
+        f"median {sorted(amps)[len(amps)//2]:.1f}, max {max(amps):.1f}")
 
     def make_net(seed):
         torch.manual_seed(seed)
@@ -218,6 +234,10 @@ def main():
                     help="0 keeps the objective stationary, which is the point")
     ap.add_argument("--resample-every", type=int, default=1000)
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--k-min", type=float, default=1.0, help="helmholtz sweep, lower end")
+    ap.add_argument("--k-max", type=float, default=6.0,
+                    help="helmholtz sweep, upper end; the default stops below the "
+                         "first resonance of the 1:3 annulus at k = 6.513")
     ap.add_argument("--arms", default="loop:4,paired:4,paired:16,paired:32")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
