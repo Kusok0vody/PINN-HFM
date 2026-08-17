@@ -76,6 +76,7 @@ net = Net(
     film_activation=nn.Tanh,
     outputs_config={"u": {"activation": ActivationFactory(Sine, omega=1.0, trainable=True)}},
     use_film=True,
+    film_layers=1,
     use_fourier=False,
 )
 
