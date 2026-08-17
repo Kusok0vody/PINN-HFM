@@ -259,6 +259,14 @@ def main():
         u = pred[:, j]
         print(f"k = {k}")
         print(f"  relative L2          {relative_l2(u, ref):.4f}")
+        # How much of the solution's size the network actually produced. A PINN
+        # that damps the field keeps a small residual — the equation is linear,
+        # so any multiple of the solution satisfies it — and pays only at the
+        # boundary. Relative L2 mixes that failure together with getting the
+        # shape wrong; this separates it out.
+        print(f"  amplitude ratio      "
+              f"{u.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt():.4f}"
+              f"   (1.0 = right size, < 1 = damped)")
         print(f"  max abs error        {max_abs_error(u, ref):.4f}"
               f"   (reference amplitude {ref.abs().max():.3f})")
         print(f"  PDE residual RMS     {res[:, j].pow(2).mean().sqrt():.4e}")

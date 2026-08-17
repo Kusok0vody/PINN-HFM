@@ -104,6 +104,23 @@ class Trainer:
         self._weights_initialized = False
         self.param_every = param_every
 
+        # Parameter sweeping needs two things that are set in different places:
+        # limits on the Physics and a non-zero period here. Either one alone is
+        # silently inert — draw_parameters returns nothing without limits, and
+        # nothing calls it at param_every = 0 — so a run can look like a sweep
+        # in the script, print no complaint, and train on one fixed batch for
+        # its whole length. Say so instead.
+        limits = getattr(pinn.physics, "limits", {}) or {}
+        if self.param_every > 0 and not limits:
+            print("Trainer: param_every > 0 but the physics has no limits, so "
+                  "parameters will never be resampled. Pass limits=... to "
+                  "setParameters to define the sweep.")
+        elif self.param_every == 0 and limits:
+            print(f"Trainer: limits are defined for {sorted(limits)} but "
+                  f"param_every = 0, so the sweep is never drawn and training "
+                  f"stays on the {pinn.physics.par.tensor.shape[0]} settings "
+                  f"passed to setParameters.")
+
         self.validator      = validator
         self.validate_every = validate_every
         self.last_metrics   = {}
@@ -362,6 +379,13 @@ class Trainer:
                         f"loss {total.item():.3e}",
                         f"lr {self.optimiser.param_groups[0]['lr']:.2e}",
                         f"{rate:.1f} it/s", f"eta {left/60:.1f}m"]
+                # The size of the solution the network is currently producing,
+                # per parameter setting. A run can drive its loss down while
+                # quietly shrinking the field, and nothing else in this line
+                # would show it.
+                if self.pinn.last_scale is not None:
+                    s = self.pinn.last_scale
+                    bits.append(f"|u| {s.min():.2e}..{s.max():.2e}")
                 bits += [f"{k} {v:.3e}" for k, v in self.last_metrics.items()
                          if k.startswith("l2/") or k == "holdout/total"]
                 print("    " + "  ".join(bits), flush=True)

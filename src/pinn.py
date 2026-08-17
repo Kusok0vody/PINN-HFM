@@ -21,6 +21,7 @@ class PINN(nn.Module):
         adaptive_ic:  bool = False,
         autoscale_inputs: bool = True,
         paired_coords: bool = False,
+        scale_free_pde: bool = False,
         device="cpu"
         ):
         from geometry.sampler import Sampler, SampledPoints
@@ -38,8 +39,10 @@ class PINN(nn.Module):
         self.adaptive_pde = adaptive_pde
         self.adaptive_bc  = adaptive_bc
         self.adaptive_ic  = adaptive_ic
-        self.paired_coords = paired_coords
-        
+        self.paired_coords  = paired_coords
+        self.scale_free_pde = scale_free_pde
+        self.last_scale     = None
+
         self.net.to(self.device)
 
         if autoscale_inputs:
@@ -103,7 +106,15 @@ class PINN(nn.Module):
                     new_points.interior.coords
                 ])
                 unpacked, pred_pde = self._evaluate(pde_combined, self.physics.par.tensor)
-                res_pde = self.physics.residualPDE(pred_pde, unpacked)
+                # Same units as the training loss. The point pool is drawn by
+                # comparing residuals across settings as well as across points,
+                # so leaving these raw while the loss is scale-free would hand
+                # nearly every collocation point to whichever setting has the
+                # largest solution.
+                res_pde = self._descale(
+                    self.physics.residualPDE(pred_pde, unpacked),
+                    scale=self._field_scale(pred_pde),
+                )
                 sumres_pde = torch.zeros(len(pde_combined), device=self.device)
                 for _, res in res_pde.items():
                     sumres_pde += res.abs().mean(dim=1).detach()
@@ -240,6 +251,46 @@ class PINN(nn.Module):
         pred = self.physics.apply_transforms(self.net(coords_out, params))
         return self.physics.apply_output_ansatz(pred, unpacked)
 
+    # A field of amplitude 1e-8 is a network that has not started rather than a
+    # solution, and dividing by its own size would turn numerical dust into a
+    # full-sized residual.
+    SCALE_FLOOR = 1e-6
+
+    def _field_scale(self, pred: dict) -> torch.Tensor:
+        """
+        Per-setting size of the predicted solution, (M,), detached.
+
+        Detached on purpose: this is a unit, not a term of the objective. Left
+        attached, the optimiser would notice that shrinking the field shrinks
+        the denominator and could chase the ratio instead of the physics.
+        """
+        sq = torch.stack([v.detach().pow(2).mean(dim=0) for v in pred.values()])
+        return sq.mean(dim=0).sqrt().clamp_min(self.SCALE_FLOOR)
+
+    def _descale(self, residuals: dict, scale: torch.Tensor = None) -> dict:
+        """
+        Divide interior residuals by the size of the field that produced them.
+
+        The equation's residual carries the dimension of the solution: for a
+        field of amplitude A approximated to relative accuracy d, it is of size
+        d*A, while the boundary error stays of size (1 - alpha) whatever A is.
+        Adding those two directly makes the best trade-off between them depend
+        on A, and for large A the cheapest answer is a damped field: the PDE is
+        linear, so alpha*u solves it exactly for any alpha, and only the
+        boundary term objects. Dividing here removes A from that comparison, so
+        the optimum in alpha sits at 1 regardless of how large the solution is.
+
+        Boundary and initial residuals are deliberately left alone. Their
+        natural scale is the data they are matched against, which is already
+        the right unit; dividing them by the field size would say that a
+        boundary error is acceptable in proportion to how large the interior
+        happens to be.
+        """
+        scale = self.last_scale if scale is None else scale
+        if not self.scale_free_pde or scale is None:
+            return residuals
+        return {k: v / scale for k, v in residuals.items()}
+
     def step(self) -> dict:
         """
         Computes all residuals for a given parameter batch.
@@ -260,6 +311,8 @@ class PINN(nn.Module):
         # --- PDE ---
         pde_coords, pred_pde = self._evaluate(self.points.interior.coords, parameters)
         res_pde    = self.physics.residualPDE(pred_pde, pde_coords)
+        self.last_scale = self._field_scale(pred_pde)
+        res_pde    = self._descale(res_pde)
 
         # --- BC ---
         res_bc_raw = {}
@@ -279,7 +332,7 @@ class PINN(nn.Module):
             res_ic    = self.physics.residualIC(pred_ic, coords_ic)
 
         # --- Extra ---
-        res_extra = self.physics.residualExtra(pred_pde, pde_coords)
+        res_extra = self._descale(self.physics.residualExtra(pred_pde, pde_coords))
 
         return {
             "pde":   res_pde,

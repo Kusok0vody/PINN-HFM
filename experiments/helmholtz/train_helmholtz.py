@@ -82,11 +82,11 @@ net = Net(
 
 K_MIN = 1.0
 K_MAX = 10.0
-N_K   = 2
+N_K   = 10
 
 ks = torch.linspace(K_MIN, K_MAX, N_K)
 parameters = [{"k": k.item()} for k in ks]
-parameters = [{"k": 10}]
+# parameters = [{"k": 10}]
 limits = {"k": {"min": K_MIN, "max": K_MAX, "N": N_K, "scale": "linear"}}
 
 physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
@@ -102,6 +102,7 @@ pinn = PINN(
     adaptive_pde=True,
     adaptive_bc=False,
     adaptive_ic=False,
+    paired_coords=True,
     device=device,
 )
 
