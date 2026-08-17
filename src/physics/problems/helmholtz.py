@@ -23,8 +23,12 @@ class helmholtz2D_annulus(Physics):
         self,
         params: list[dict],
         boundaries: dict,
+        initial: dict = None,
         limits: dict = {},
     ):
+        # initial is accepted and ignored: the problem is stationary, but every
+        # other Physics subclass takes the argument and callers pass it
+        # positionally or by name without checking which problem they hold.
         required = {"k"}
         missing = required - params[0].keys()
         if missing:
