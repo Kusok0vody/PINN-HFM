@@ -53,7 +53,7 @@ class HyperGradAdam(Optimizer):
                  eps: float = 1e-8, hyper_lr: float = 0.3,
                  normalize: bool = True, lr_min: float = 1e-8,
                  lr_max: float = 1.0):
-        super().__init__(params, dict(lr=lr, betas=betas, eps=eps,
+        super().__init__(params, dict(lr=lr, lr0=lr, betas=betas, eps=eps,
                                       hyper_lr=hyper_lr, normalize=normalize,
                                       lr_min=lr_min, lr_max=lr_max))
         self._k = 0
@@ -105,6 +105,21 @@ class HyperGradAdam(Optimizer):
                 st["u_prev"] = u
 
         return loss
+
+    def reset_lr(self, lr: float = None):
+        """
+        Return the rate to its starting value.
+
+        The hypergradient reads the alignment of consecutive gradients, which
+        assumes both come from the same objective. When the physics parameters
+        are resampled the objective changes outright: the error jumps, the
+        alignment becomes noise, and the rate inherited from before the change
+        no longer refers to anything. Measured on CDR, leaving it alone let the
+        rate drift two orders of magnitude upward, into a range where training
+        collapses.
+        """
+        for group in self.param_groups:
+            group["lr"] = group["lr0"] if lr is None else lr
 
     @property
     def last_eta(self) -> float:

@@ -202,6 +202,25 @@ class Net(nn.Module):
         else:
             self.film = None
 
+        # An MLP with num_layers=1 is a single Linear: the loop that emits
+        # activations runs zero times. Any activation configured for such a
+        # block is silently discarded, which is easy to miss when a head is
+        # given a Morlet or Sine and quietly gets none.
+        degenerate = [
+            name for name, n in (("encoder_layers", encoder_layers),
+                                 ("trunk_layers",   trunk_layers),
+                                 ("head_layers",    head_layers),
+                                 ("film_layers",    film_layers if use_film else 2))
+            if n < 2
+        ]
+        if degenerate:
+            import warnings
+            warnings.warn(
+                f"{', '.join(degenerate)} = 1: these blocks are a bare Linear and "
+                "their activation is unused. Set 2 or more if you meant to keep it.",
+                stacklevel=2,
+            )
+
         self.outputs = nn.ModuleDict()
 
         for name, cfg in outputs_config.items():

@@ -51,6 +51,8 @@ class Trainer:
         validator               = None,
         validate_every:   int   = 0,
         balancing:        str   = "lra",
+        optimiser:        str   = "nadam",
+        progress:         bool  = True,
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -62,6 +64,7 @@ class Trainer:
         self.checkpoint_every = checkpoint_every
         self.device           = device
         self.logger_type      = logger
+        self.progress         = progress
         self.start_step       = start_step
 
         if balancing not in ("lra", "none"):
@@ -80,10 +83,16 @@ class Trainer:
         self.validate_every = validate_every
         self.last_metrics   = {}
 
-        self.optimiser = torch.optim.NAdam(
-            pinn.net.parameters(),
-            lr=lr,
-        )
+        if optimiser == "nadam":
+            self.optimiser = torch.optim.NAdam(pinn.net.parameters(), lr=lr)
+        elif optimiser == "hypergrad":
+            from training.adaptive import HyperGradAdam
+            self.optimiser = HyperGradAdam(pinn.net.parameters(), lr=lr)
+        else:
+            raise ValueError(
+                f"unknown optimiser '{optimiser}'; choose 'nadam' or 'hypergrad'"
+            )
+        self.optimiser_kind = optimiser
 
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimiser,
@@ -255,12 +264,17 @@ class Trainer:
     def train(self):
         self.pinn.resample()
 
-        pbar = tqdm(range(self.start_step, self.start_step+self.n_iter+1), desc="Training")
+        pbar = tqdm(range(self.start_step, self.start_step+self.n_iter+1),
+                    desc="Training", disable=not self.progress)
 
         for step in pbar:
             
             if self.param_every > 0 and step % self.param_every == 0:
                 self.pinn.physics._resample_parameters()
+                # The objective just changed; an adapted step size carried
+                # across that boundary refers to the previous problem.
+                if hasattr(self.optimiser, "reset_lr"):
+                    self.optimiser.reset_lr()
             
             if step > self.start_step and step % self.resample_every == 0:
                 self.pinn.resample_adaptive()
