@@ -229,7 +229,8 @@ def run_arm(problem, cfg, seed, steps, device):
                  checkpoint_every=10 ** 9, gradnorm_every=200, lra_alpha=0.99,
                  balancing=cfg["balancing"], optimiser=cfg["optimiser"],
                  param_every=cfg["param_every"], checkpoint_path="/tmp/bench",
-                 run_name="bench", save_final=False, logger="none", device=device, progress=False)
+                 run_name="bench", save_final=False, logger="none", device=device, progress=False,
+                 log_every=max(1, steps // 10))
     t0 = time.time()
     tr.train()
     wall = time.time() - t0
@@ -264,23 +265,54 @@ def main():
 
     out = pathlib.Path(args.out or f"results_{args.problem}_{args.sweep}.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"{args.problem}/{args.sweep}: {len(SWEEPS[args.sweep])} arms x {args.seeds} seeds "
-          f"x {args.steps} steps -> {out}", flush=True)
 
-    for label, over in SWEEPS[args.sweep]:
+    arms  = SWEEPS[args.sweep]
+    total = len(arms) * args.seeds
+    stamp = lambda: time.strftime("%H:%M:%S")
+    say   = lambda msg: print(f"[{stamp()}] {msg}", flush=True)
+
+    say(f"{args.problem} / {args.sweep}   device {args.device}")
+    say(f"{len(arms)} arms x {args.seeds} seeds = {total} runs, {args.steps} steps each")
+    say(f"arms: {', '.join(a for a, _ in arms)}")
+    say(f"writing to {out.resolve()}")
+
+    t_start, done, failed, scores = time.time(), 0, 0, {}
+    for label, over in arms:
         for s in range(args.seed_offset, args.seed_offset + args.seeds):
+            done    += 1
+            elapsed  = time.time() - t_start
+            eta      = (elapsed / (done - 1)) * (total - done + 1) if done > 1 else 0.0
+            say(f"run {done}/{total}  {label}  seed {s}"
+                f"  (elapsed {elapsed/60:.1f}m, eta {eta/60:.0f}m)")
+
             cfg = {**BASE, **over}
             try:
                 res = run_arm(args.problem, cfg, s, args.steps, args.device)
                 rec = {"problem": args.problem, "sweep": args.sweep, "arm": label,
                        "seed": s, "steps": args.steps, **res}
+                scores.setdefault(label, []).append(res["mean_l2"])
+                say(f"  -> L2 {res['mean_l2']:.4f}   {res['wall_s']:.0f}s, "
+                    f"{res['n_params']} weights, final lr {res['final_lr']:.2e}")
             except Exception as exc:                       # keep the array job alive
+                failed += 1
                 rec = {"problem": args.problem, "sweep": args.sweep, "arm": label,
                        "seed": s, "error": f"{type(exc).__name__}: {exc}"}
+                say(f"  -> FAILED  {type(exc).__name__}: {exc}")
+
             with out.open("a") as fh:
                 fh.write(json.dumps(rec) + "\n")
-            print(f"  {label:22s} seed {s:3d}  "
-                  f"{rec.get('mean_l2', rec.get('error')):}", flush=True)
+
+        if label in scores:
+            v = scores[label]
+            say(f"== {label}: mean L2 {sum(v)/len(v):.4f} over {len(v)} seeds "
+                f"(min {min(v):.4f}, max {max(v):.4f})")
+
+    say(f"finished {total} runs in {(time.time()-t_start)/60:.1f}m, {failed} failed")
+    if scores:
+        say("ranking, best first:")
+        for label, v in sorted(scores.items(), key=lambda kv: sum(kv[1]) / len(kv[1])):
+            print(f"    {label:24s} {sum(v)/len(v):.4f}   "
+                  f"seed spread x{max(v)/max(min(v), 1e-12):.2f}   n={len(v)}", flush=True)
 
 
 if __name__ == "__main__":

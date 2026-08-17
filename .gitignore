@@ -5,3 +5,9 @@ net_graph.pdf
 *.gif
 /runs
 /checkpoints
+
+# scratch from experiment runs
+_*.log
+_*.py
+results_*.jsonl
+/_*_ckpt

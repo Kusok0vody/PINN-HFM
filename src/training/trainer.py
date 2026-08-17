@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 from tqdm import tqdm
 import datetime
@@ -30,6 +31,13 @@ class Trainer:
         param_every:      resample physics parameters every K iterations (0 = never)
         validator:        Validator instance, or None to skip validation
         validate_every:   run the validator every K iterations (0 = never)
+        optimiser:        "nadam" or "hypergrad" (adapts its own learning rate)
+        progress:         show the tqdm bar; turn off for non-interactive runs
+        log_every:        print one compact status line every K iterations.
+                          Intended for cluster logs, where a progress bar is
+                          megabytes of noise but total silence for hours is
+                          worse — there is no way to tell a slow run from a
+                          hung one.
     """
 
     def __init__(
@@ -53,6 +61,7 @@ class Trainer:
         balancing:        str   = "lra",
         optimiser:        str   = "nadam",
         progress:         bool  = True,
+        log_every:        int   = 0,
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -65,6 +74,7 @@ class Trainer:
         self.device           = device
         self.logger_type      = logger
         self.progress         = progress
+        self.log_every        = log_every
         self.start_step       = start_step
 
         if balancing not in ("lra", "none"):
@@ -262,6 +272,7 @@ class Trainer:
         return net, ckpt["step"]
 
     def train(self):
+        self._t_start = time.time()
         self.pinn.resample()
 
         pbar = tqdm(range(self.start_step, self.start_step+self.n_iter+1),
@@ -300,6 +311,18 @@ class Trainer:
             if (self.validator is not None and self.validate_every > 0
                     and step % self.validate_every == 0):
                 self._validate(step)
+
+            if self.log_every > 0 and step % self.log_every == 0:
+                done = step - self.start_step + 1
+                rate = done / max(time.time() - self._t_start, 1e-9)
+                left = (self.n_iter + 1 - done) / max(rate, 1e-9)
+                bits = [f"step {step}/{self.start_step + self.n_iter}",
+                        f"loss {total.item():.3e}",
+                        f"lr {self.optimiser.param_groups[0]['lr']:.2e}",
+                        f"{rate:.1f} it/s", f"eta {left/60:.1f}m"]
+                bits += [f"{k} {v:.3e}" for k, v in self.last_metrics.items()
+                         if k.startswith("l2/") or k == "holdout/total"]
+                print("    " + "  ".join(bits), flush=True)
 
             postfix = {
                 "loss": f"{total.item():.3e}",
