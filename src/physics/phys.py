@@ -90,7 +90,7 @@ class Physics(ABC):
             for name, ic in self.initial.items()
         }
     
-    def residualExtra(self, pred: dict, coords: torch.Tensor) -> dict:
+    def residualExtra(self, pred: dict, coords: dict) -> dict:
         return {}
 
     def apply_boundary_constraints(self, res_bc: dict) -> dict:

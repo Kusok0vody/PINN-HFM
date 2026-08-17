@@ -29,9 +29,6 @@ def derivative(dx: torch.Tensor, x: torch.Tensor, order: int = 1) -> torch.Tenso
         )[0]
     return dx
 
-VECTORISE_DERIVATIVES = True
-
-
 def _derivative_loop(f: torch.Tensor, x: torch.Tensor, order: int) -> torch.Tensor:
     """One autograd call per parameter setting. Kept as the reference path."""
     for _ in range(order):
@@ -49,32 +46,45 @@ def _derivative_loop(f: torch.Tensor, x: torch.Tensor, order: int) -> torch.Tens
     return f
 
 
-def _derivative_vmap(f: torch.Tensor, x: torch.Tensor, order: int) -> torch.Tensor:
+def derivative_paired(f: torch.Tensor, x: torch.Tensor, order: int = 1) -> torch.Tensor:
     """
-    The same derivatives, one vmapped autograd call per order.
+    d^n f / dx^n where f and x are both (N, M) and f[n, m] depends only on
+    x[n, m]. Returns (N, M).
 
-    The obvious shortcut is wrong: grad(f.sum(), x) collapses the parameter axis
-    and returns sum_m df[:, m]/dx, not the individual components. Recovering
-    them by slicing is what the loop does, one call at a time.
-
-    Batched grad_outputs instead seeds M vector-Jacobian products at once, row m
-    of the seed asking for df[:, m]/dx. The result arrives as (M, N, 1) and is
-    transposed back.
-
-    create_graph is kept so the output stays differentiable with respect to the
-    network weights — verified against the loop to 2e-7 on the parameter
-    gradients, which is the property that silently breaks if the graph is cut.
+    With one leaf per (point, parameter) pair the whole Jacobian is diagonal, so
+    a single backward on f.sum() collects every component — no loop over
+    settings. This is the shortcut that is wrong when x is (N, 1) shared across
+    settings, because there the sum collapses the parameter axis, and correct
+    once it is not.
     """
     for _ in range(order):
-        n, m = f.shape
-        seeds = torch.eye(m, dtype=f.dtype, device=f.device)
-        seeds = seeds.unsqueeze(1).expand(m, n, m)
-        g = torch.autograd.grad(
-            outputs=f, inputs=x, grad_outputs=seeds,
-            is_grads_batched=True, create_graph=True, retain_graph=True,
+        f = torch.autograd.grad(
+            outputs=f.sum(), inputs=x,
+            create_graph=True, retain_graph=True,
         )[0]
-        f = g.squeeze(-1).transpose(0, 1)
     return f
+
+
+def unpack_coords_paired(coords: torch.Tensor, has_time: bool, dim: int, n_mu: int,
+                         requires_grad: bool = True) -> tuple[dict, torch.Tensor]:
+    """
+    Unpack coordinates and replicate them across parameter settings.
+
+    Args:
+        coords: (N, n_coords)
+        n_mu:   number of parameter settings M
+
+    Returns:
+        unpacked: {name: (N, M)} leaves
+        X:        (N, M, n_coords) for Net.forward_paired
+    """
+    unpacked = {}
+    for i, name in enumerate(COORD_ORDER[(has_time, dim)]):
+        col = coords[:, i:i+1].detach().expand(-1, n_mu).contiguous()
+        if requires_grad:
+            col = col.requires_grad_(True)
+        unpacked[name] = col
+    return unpacked, torch.stack(list(unpacked.values()), dim=-1)
 
 
 def derivative_batched(f: torch.Tensor, x: torch.Tensor, order: int = 1) -> torch.Tensor:
@@ -82,13 +92,20 @@ def derivative_batched(f: torch.Tensor, x: torch.Tensor, order: int = 1) -> torc
     Computes d^n f / dx^n for f of shape (N, M) and x of shape (N, 1).
     Returns (N, M).
 
-    Set utils.VECTORISE_DERIVATIVES = False to fall back to the explicit loop,
-    which is slower by roughly a factor of three but depends on nothing beyond
-    plain autograd.
+    When x has the same shape as f the coordinates carry one leaf per
+    (point, parameter) pair and a single backward suffices. Every physics module
+    reaches that path without changing a line, because the dispatch is on shape
+    rather than on a flag threaded through the call sites.
+
+    Otherwise the coordinates are shared across settings and the components have
+    to be separated one at a time. A batched-seed variant of that loop was tried
+    and removed: measured on the real workload (second derivative plus backward
+    to the weights) it ran at 0.8-1.1x the loop's speed and used the same
+    memory, so it bought nothing for an extra code path.
     """
-    if not VECTORISE_DERIVATIVES or f.shape[1] == 1:
-        return _derivative_loop(f, x, order)
-    return _derivative_vmap(f, x, order)
+    if x.shape == f.shape and x.dim() == 2 and x.shape[1] > 1:
+        return derivative_paired(f, x, order)
+    return _derivative_loop(f, x, order)
 
 def smooth_clamp(x: torch.Tensor, lo: float = 0.0, hi: float = 1.0, eps: float = 1e-3) -> torch.Tensor:
     """

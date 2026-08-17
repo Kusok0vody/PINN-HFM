@@ -369,6 +369,45 @@ class Net(nn.Module):
             for name, module in self.outputs.items()
         }
 
+    def forward_paired(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
+        """
+        Same network, coordinates already replicated per parameter setting.
+
+        Args:
+            X:   (N, M, x_dim) — coordinate for every (point, parameter) pair
+            mu:  (M, mu_dim)
+
+        Returns:
+            dict: name -> (N, M), identical to forward()
+
+        forward() feeds one coordinate row to all M settings, so f[n, m] depends
+        on a single leaf x[n] and a backward pass sums over m. Recovering the M
+        components then costs M passes. Here every pair owns its leaf, so one
+        pass over f.sum() yields all of them.
+
+        Only encoder_x pays for the replication — roughly a twentieth of the
+        forward at the usual widths. encoder_mu still sees M rows and is
+        broadcast, and the trunk already ran on N*M elements either way.
+        """
+        n, m, _ = X.shape
+        Xf = X.reshape(n * m, -1)
+        if self.use_fourier:
+            Xf = self.fourier(self._rescale(Xf, self.x_lo, self.x_hi))
+        else:
+            Xf = self._rescale(Xf, self.x_lo, self.x_hi)
+
+        z_x  = self.encoder_x(Xf).reshape(n, m, -1)
+        z_mu = self.encoder_mu(self._rescale_mu(mu))
+
+        Z = torch.cat([z_x, z_mu.unsqueeze(0).expand(n, -1, -1)], dim=-1)
+        H = self.trunk(Z)
+
+        if self.use_film:
+            gamma, beta = self.film(z_mu).chunk(2, dim=-1)
+            H = gamma.unsqueeze(0) * H + beta.unsqueeze(0)
+
+        return {name: module(H).squeeze(-1) for name, module in self.outputs.items()}
+
     def __repr__(self) -> str:
         lines = ["Net("]
         lines.append(f"  use_fourier = {self.use_fourier}")
