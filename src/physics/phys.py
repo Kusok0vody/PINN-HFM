@@ -140,35 +140,57 @@ class Physics(ABC):
             for name, val in pred.items()
         }
         
-    def _resample_parameters(self) -> None:
+    def draw_parameters(self, n: int = None) -> list[dict]:
         """
-        Resamples only parameters that have limits defined.
-        All limit entries must share the same N (batch size).
-        """
-        if not hasattr(self, "limits") or not self.limits:
-            return
+        Draw n parameter settings from the declared limits, without installing
+        them. Parameters with no limits keep their current value.
 
-        n = next(iter(self.limits.values()))["N"]
+        Split out of _resample_parameters so that a caller can draw a candidate
+        pool, score it, and keep only the settings worth training on.
+        """
+        if not getattr(self, "limits", None):
+            return []
+
+        sizes = {lim["N"] for lim in self.limits.values()}
+        if len(sizes) > 1:
+            raise ValueError(
+                f"all limit entries must share the same N, got {sorted(sizes)}"
+            )
+        n = sizes.pop() if n is None else n
         new_params = [{} for _ in range(n)]
 
         for key, lim in self.limits.items():
-            lo, hi = lim["min"], lim["max"]
-            scale  = lim.get("scale", "log")
+            lo, hi = float(lim["min"]), float(lim["max"])
+            # "linear" is the safe default: a log sweep needs a positive lower
+            # bound, and min = 0 is common enough that defaulting to log turns
+            # an omitted key into a bare "math domain error".
+            scale = lim.get("scale", "linear")
 
             if scale == "log":
-                vals = torch.exp(
-                    torch.rand(n) * (log(hi) - log(lo)) + log(lo)
-                )
+                if lo <= 0.0:
+                    raise ValueError(
+                        f"limits['{key}'] uses scale='log' but min={lo}; "
+                        "a log sweep needs a strictly positive lower bound."
+                    )
+                vals = torch.exp(torch.rand(n) * (log(hi) - log(lo)) + log(lo))
             else:
                 vals = torch.rand(n) * (hi - lo) + lo
 
             for i, v in enumerate(vals.tolist()):
                 new_params[i][key] = v
 
-        for key in self.param_order:
-            if key not in self.limits:
-                fixed_val = self.par[key][0].item()
-                for p in new_params:
-                    p[key] = fixed_val
+        for p in new_params:
+            for key in self.param_order:
+                if key not in self.limits:
+                    p[key] = self.par[key][0].item()
+        return new_params
 
+    def _resample_parameters(self) -> None:
+        """
+        Resamples only parameters that have limits defined.
+        All limit entries must share the same N (batch size).
+        """
+        new_params = self.draw_parameters()
+        if not new_params:
+            return
         self.par = self.make_param_batch(new_params)

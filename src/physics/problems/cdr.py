@@ -62,8 +62,25 @@ class CDR1D(Physics):
         sigma      = math.pi / 4.0
         default_ic = lambda x: torch.exp(-(x - math.pi) ** 2 / (2.0 * sigma ** 2))
         init_fn    = (initial or {}).get("u", default_ic)
-        init_fn_prime = lambda x: -(x - math.pi) / sigma**2 * init_fn(x)
-        
+
+        def init_fn_prime(x: torch.Tensor) -> torch.Tensor:
+            """
+            d(init_fn)/dx by autograd rather than a closed form.
+
+            The hard-IC ansatz for ux must be the derivative of whatever initial
+            condition is actually in use; a hand-written formula silently stays
+            the derivative of the default Gaussian when a custom one is passed,
+            and residualPDE then builds u_xx from the wrong function. The graph
+            is kept alive because residualPDE differentiates ux again.
+            """
+            with torch.enable_grad():
+                xg = x if x.requires_grad else x.detach().requires_grad_(True)
+                grad, = torch.autograd.grad(
+                    init_fn(xg).sum(), xg, create_graph=True
+                )
+            return grad
+
+
         if hard_ic:
             self.initial       = {}
             self.output_ansatz = {

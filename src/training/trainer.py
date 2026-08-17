@@ -46,10 +46,11 @@ class Trainer:
         save_final:       bool  = True,
         start_step:       int   = 0,
         gradnorm_every:   int   = 200,
-        lra_alpha:        float = 0.01,
+        lra_alpha:        float = 0.9,
         param_every:      int   = 0,
         validator               = None,
         validate_every:   int   = 0,
+        balancing:        str   = "lra",
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -63,13 +64,15 @@ class Trainer:
         self.logger_type      = logger
         self.start_step       = start_step
 
+        if balancing not in ("lra", "none"):
+            raise ValueError(
+                f"unknown balancing scheme '{balancing}'; choose 'lra' or 'none'"
+            )
+        self.balancing        = balancing
         self.gradnorm_every   = gradnorm_every
         self.lra_alpha        = lra_alpha
-        self.adaptive_weights = {
-            f"{group}/{name}": 1.0
-            for group, res_dict in {}.items()
-            for name in res_dict
-        }
+
+        self.adaptive_weights = {}
         self._weights_initialized = False
         self.param_every = param_every
 
@@ -103,42 +106,67 @@ class Trainer:
         else:
             self.writer = None
 
-    def _update_weights_gradnorm(self, residuals: dict):
-        grad_norms = {}
+    @staticmethod
+    def _flat_grad(loss, params, retain: bool = True) -> torch.Tensor:
+        grads = torch.autograd.grad(loss, params, retain_graph=retain, allow_unused=True)
+        return torch.cat([
+            (g if g is not None else torch.zeros_like(p)).flatten()
+            for g, p in zip(grads, params)
+        ])
 
-        for group, res_dict in residuals.items():
-            for name, res in res_dict.items():
-                key  = f"{group}/{name}"
-                w    = self.adaptive_weights.get(key, 1.0)
-                term = w * (res**2).mean()
+    def _term_losses(self, residuals: dict) -> dict:
+        """Unweighted per-term losses, keyed "group/name"."""
+        return {
+            f"{group}/{name}": (res ** 2).mean()
+            for group, res_dict in residuals.items()
+            for name, res in res_dict.items()
+        }
 
-                self.optimiser.zero_grad()
-                term.backward(retain_graph=True)
+    def _update_weights_lra(self, residuals: dict):
+        """
+        Learning Rate Annealing, Wang et al., as given in Bischof & Kraus Eq. (6):
 
-                grads = [
-                    p.grad.flatten()
-                    for p in self.pinn.net.parameters()
-                    if p.grad is not None
-                ]
-                if grads:
-                    grad_norms[key] = torch.cat(grads).norm().item()
+            lambda_hat_i(t) = max|grad_theta L_Omega(t)| / mean|grad_theta L_i(t)|
+            lambda_i(t)     = alpha lambda_i(t-1) + (1 - alpha) lambda_hat_i(t)
+
+        The governing-equation loss L_Omega is the reference and keeps weight 1;
+        only the boundary, initial and data terms are rescaled. Note the
+        statistics are a max and a mean over gradient *entries*, not L2 norms —
+        the two differ substantially once the parameter count is large.
+
+        Where the paper assumes a single L_Omega, a system contributes several
+        PDE residuals; their sum is used as the reference, which is the loss the
+        governing equations actually pose.
+
+        Despite its name this schedules the loss weights, not the learning rate.
+        """
+        params = [p for p in self.pinn.net.parameters() if p.requires_grad]
+        losses = self._term_losses(residuals)
+
+        pde_terms = [v for k, v in losses.items() if k.startswith("pde/")]
+        if not pde_terms:
+            return
+        ref = self._flat_grad(sum(pde_terms), params)
+        num = ref.abs().max().item()
+
+        for key, loss in losses.items():
+            if key.startswith("pde/"):
+                self.adaptive_weights[key] = 1.0
+                continue
+            den = self._flat_grad(loss, params).abs().mean().item()
+            if den < 1e-12 or num < 1e-12:
+                continue
+            lam_hat = num / den
+            old     = self.adaptive_weights.get(key, 1.0)
+            self.adaptive_weights[key] = (
+                self.lra_alpha * old + (1.0 - self.lra_alpha) * lam_hat
+            )
 
         self.optimiser.zero_grad()
 
-        if not grad_norms:
-            return
-
-        mean_norm = sum(grad_norms.values()) / len(grad_norms)
-
-        for key, norm in grad_norms.items():
-            if norm < 1e-12:
-                continue
-            w_new = mean_norm / (norm + 1e-8)
-            w_new = max(0.01, min(w_new, 100.0))
-            old   = self.adaptive_weights.get(key, 1.0)
-            self.adaptive_weights[key] = (
-                (1 - self.lra_alpha) * old + self.lra_alpha * w_new
-            )
+    def _update_weights(self, residuals: dict):
+        if self.balancing == "lra":
+            self._update_weights_lra(residuals)
 
     def _aggregate_loss(self, residuals: dict) -> tuple[torch.Tensor, dict]:
         loss_terms = {}
@@ -211,7 +239,7 @@ class Trainer:
             net = Net.from_checkpoint(path, device=device)
             net.to(device)
         else:
-            pinn.net.load_state_dict(ckpt["net"])
+            Net.load_weights(pinn.net, ckpt["net"])
             pinn.net.to(device)
             net = pinn.net
 
@@ -240,16 +268,18 @@ class Trainer:
             self.optimiser.zero_grad()
 
             residuals = self.pinn.step()
-            if not self._weights_initialized or step % self.gradnorm_every == 0:
-                self._update_weights_gradnorm(residuals)
-                self._weights_initialized = True
-                residuals = self.pinn.step()
-                
+
+            if self.balancing == "lra":
+                if not self._weights_initialized or step % self.gradnorm_every == 0:
+                    self._update_weights_lra(residuals)
+                    self._weights_initialized = True
+                    residuals = self.pinn.step()
+
             total, loss_terms = self._aggregate_loss(residuals)
 
             total.backward()
             self.optimiser.step()
-            self.scheduler.step(total)
+            self.scheduler.step(total.item())
 
             self._log(step, loss_terms, total.item())
 

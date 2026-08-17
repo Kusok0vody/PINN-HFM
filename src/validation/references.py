@@ -114,8 +114,15 @@ def helmholtz_annulus(
     # The solution exists only on the annulus. Evaluating the series outside it
     # is not merely wrong but singular: Y_n diverges as rho -> 0, so a cartesian
     # grid covering the inner hole would poison the sum with inf and NaN.
-    eps    = 1e-12 * r_out
+    #
+    # The tolerance is sized for float32 callers, which is what the rest of the
+    # project uses: a polar grid built as rho*cos(theta) in single precision
+    # misses its own boundary radii by ~1e-7 relative, and a tighter tolerance
+    # would silently turn whole boundary rings into NaN. Radii inside the
+    # tolerance are clamped onto the boundary rather than extrapolated.
+    eps    = 1e-6 * r_out
     inside = (rho >= r_in - eps) & (rho <= r_out + eps)
+    rho    = np.clip(rho, r_in, r_out)
 
     kappa = math.sqrt(k)
     m     = n_arcs // 2
@@ -166,6 +173,61 @@ def helmholtz_annulus(
     u = np.full(rho.shape, np.nan)
     u[inside] = acc
     return u.reshape(shape)
+
+
+def advection_diffusion_periodic(
+    t, x,
+    beta:     float,
+    nu:       float,
+    sigma:    float = math.pi / 4.0,
+    x0:       float = math.pi,
+    L:        float = 2.0 * math.pi,
+    n_images: int   = 4,
+):
+    """
+    Exact solution of the periodic advection-diffusion equation.
+
+        du/dt + beta du/dx - nu d2u/dx2 = 0        on [0, L], periodic
+        u(0, x) = exp(-(x - x0)^2 / (2 sigma^2))
+
+    This is the CDR problem with the reaction term switched off (rho = 0),
+    where a closed form exists: the Gaussian is advected at speed beta while
+    its variance grows as sigma^2 + 2 nu t. Periodicity is imposed by summing
+    over image sources displaced by multiples of L, which matters as soon as
+    beta * t is comparable to L — a free-space Gaussian would place the bump
+    outside the domain instead of wrapping it around.
+
+    Note on the initial condition: CDR1D imposes the plain Gaussian, not its
+    periodic extension. The two differ by the images at t = 0, about 3e-4 for
+    the default sigma = pi/4, which bounds how exact this reference can be.
+    Narrow bumps make that discrepancy negligible, wide ones do not.
+
+    Args:
+        t, x:     coordinate arrays of any matching shape (numpy or torch)
+        beta:     advection speed
+        nu:       diffusion coefficient; must be non-negative
+        sigma:    initial Gaussian width
+        x0:       initial centre
+        L:        domain period
+        n_images: how many image sources to sum on each side
+
+    Returns:
+        numpy array of u, broadcast to the shape of (t, x)
+    """
+    if nu < 0.0:
+        raise ValueError(f"nu must be non-negative (got {nu}).")
+
+    t = np.asarray(t.detach().cpu() if hasattr(t, "detach") else t, dtype=np.float64)
+    x = np.asarray(x.detach().cpu() if hasattr(x, "detach") else x, dtype=np.float64)
+
+    var = sigma ** 2 + 2.0 * nu * t
+    amp = sigma / np.sqrt(var)
+
+    u = np.zeros(np.broadcast(t, x).shape, dtype=np.float64)
+    for m in range(-n_images, n_images + 1):
+        shifted = x - x0 - beta * t + m * L
+        u = u + amp * np.exp(-(shifted ** 2) / (2.0 * var))
+    return u
 
 
 def helmholtz_annulus_resonances(k_min, k_max, r_in, r_out, n_arcs=8,

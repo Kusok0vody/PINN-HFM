@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -18,6 +19,7 @@ class PINN(nn.Module):
         adaptive_pde: bool = True,
         adaptive_bc:  bool = False,
         adaptive_ic:  bool = False,
+        autoscale_inputs: bool = True,
         device="cpu"
         ):
         from geometry.sampler import Sampler, SampledPoints
@@ -37,6 +39,44 @@ class PINN(nn.Module):
         self.adaptive_ic  = adaptive_ic
         
         self.net.to(self.device)
+
+        if autoscale_inputs:
+            self.autoscale_inputs()
+
+    def autoscale_inputs(self):
+        """
+        Derive the network's input rescaling from the problem rather than from
+        a hand-tuned constant.
+
+        Coordinate bounds come from the sampler's bounding box, which is already
+        aligned with Geometry.coord_order and therefore with the column order
+        the network is fed. Parameter bounds come from physics.limits where a
+        sweep is defined, and from the spread of the current batch otherwise;
+        a single fixed parameter leaves that axis as the identity.
+        """
+        lows, highs = self.sampler._bounding_box()
+
+        par        = self.physics.par
+        mu_lo      = par.tensor.min(dim=0).values.clone()
+        mu_hi      = par.tensor.max(dim=0).values.clone()
+        mu_log     = torch.zeros(len(par.names), dtype=torch.bool)
+
+        for i, name in enumerate(par.names):
+            lim = getattr(self.physics, "limits", {}).get(name)
+            if lim is None:
+                continue
+            lo, hi = float(lim["min"]), float(lim["max"])
+            # Match the rescaling to how the sweep is actually drawn: a
+            # log-uniform parameter mapped linearly would reach the network
+            # with almost all of its mass bunched at one end.
+            if lim.get("scale", "linear") == "log" and lo > 0.0:
+                mu_log[i] = True
+                lo, hi = math.log(lo), math.log(hi)
+            mu_lo[i], mu_hi[i] = lo, hi
+
+        self.net.set_input_bounds(
+            x_lo=lows, x_hi=highs, mu_lo=mu_lo, mu_hi=mu_hi, mu_log=mu_log
+        )
 
     def resample(self):
         """Generates a new pool of collocation points."""

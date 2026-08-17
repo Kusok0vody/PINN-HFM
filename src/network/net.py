@@ -9,16 +9,33 @@ class FourierEmbedding(nn.Module):
     Fixed Fourier embedding for input coordinates.
     Non-trainable — expands input representation with high-frequency features.
 
-    x → [sin(2pi w1 x), cos(2pi w1 x), ..., sin(2pi wn x), cos(2pi wn x)]
+    x → [sin(pi w1 x), cos(pi w1 x), ..., sin(pi wn x), cos(pi wn x)]
 
     Frequencies form a geometric progression: wi = w_min · r^i
+
+    Convention: omega counts full periods across the *whole* input domain,
+    which Net rescales to [-1, 1] before this layer sees it. Hence the pi
+    rather than 2*pi: pi * omega * x completes omega periods over a width of 2.
+    omega = 1 therefore means one oscillation across the domain, in every
+    problem, whatever the physical units.
+
+    The earlier convention used 2*pi*omega*x, i.e. omega periods per unit
+    coordinate. That made the same omega mean wildly different things per
+    problem (64 oscillations across t in [0,1], but 1920 across t in [0,30]),
+    and integer omega aliased x with x+1 inside the rescaled domain.
+
+    A caution that the convention does not remove: a PINN differentiates the
+    network twice, and mode omega contributes (pi omega)^2 to a second
+    derivative. Large omega_max therefore swamps the PDE residual with
+    high-frequency noise at initialisation, regardless of scaling. Keep
+    omega_max near the number of oscillations the solution actually has.
     """
     def __init__(
         self,
         in_dim:    int,
         n_freqs:   int,
         omega_min: float = 1.0,
-        omega_max: float = 64.0,
+        omega_max: float = 8.0,
     ):
         super().__init__()
 
@@ -33,7 +50,7 @@ class FourierEmbedding(nn.Module):
         self.out_dim = in_dim * 2 * n_freqs
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        proj = 2 * math.pi * x.unsqueeze(-1) * self.freqs
+        proj = math.pi * x.unsqueeze(-1) * self.freqs
         emb  = torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
         return emb.flatten(-2)
 
@@ -123,6 +140,20 @@ class Net(nn.Module):
 
         self.use_film    = use_film
         self.use_fourier = use_fourier
+
+        # Affine input rescaling to [-1, 1], applied inside forward() so that
+        # autograd carries the chain-rule factor and the physics keeps
+        # differentiating with respect to genuine physical coordinates.
+        # Defaults are the identity map, so an un-configured Net behaves exactly
+        # as before; PINN fills these in from the sampler's bounding box.
+        self.register_buffer("x_lo",  -torch.ones(x_dim))
+        self.register_buffer("x_hi",   torch.ones(x_dim))
+        self.register_buffer("mu_lo", -torch.ones(mu_dim))
+        self.register_buffer("mu_hi",  torch.ones(mu_dim))
+        # Parameters swept on a log scale are rescaled in log space: a
+        # log-uniform draw mapped linearly would pile most of its mass into a
+        # sliver of the input range.
+        self.register_buffer("mu_log", torch.zeros(mu_dim, dtype=torch.bool))
 
         act_encoder = encoder_activation or activation
         act_trunk   = trunk_activation   or activation
@@ -225,6 +256,57 @@ class Net(nn.Module):
                 for mlp in module.mlps:
                     init_mlp(mlp)
 
+    def set_input_bounds(self, x_lo=None, x_hi=None, mu_lo=None, mu_hi=None,
+                         mu_log=None):
+        """
+        Install the affine map that sends each input axis onto [-1, 1].
+
+        Un-normalised inputs are the hidden cause of several nominally free
+        hyperparameters. SIREN initialisation in mlp._init_linear assumes inputs
+        in [-1, 1]; the Fourier embedding measures frequency in cycles per unit
+        coordinate, so the same omega_max means something different in every
+        problem. Fixing the scale once here makes both meaningful.
+
+        Axes whose range collapses to a point are left as the identity — a
+        single parameter setting must not divide by zero.
+        """
+        def install(lo_name, hi_name, lo, hi):
+            if lo is None or hi is None:
+                return
+            lo = torch.as_tensor(lo, dtype=torch.float32).flatten()
+            hi = torch.as_tensor(hi, dtype=torch.float32).flatten()
+            buf_lo, buf_hi = getattr(self, lo_name), getattr(self, hi_name)
+            if lo.shape != buf_lo.shape:
+                raise ValueError(
+                    f"{lo_name}: expected {tuple(buf_lo.shape)}, got {tuple(lo.shape)}"
+                )
+            degenerate = (hi - lo).abs() < 1e-12
+            lo = torch.where(degenerate, -torch.ones_like(lo), lo)
+            hi = torch.where(degenerate,  torch.ones_like(hi), hi)
+            buf_lo.copy_(lo.to(buf_lo.device))
+            buf_hi.copy_(hi.to(buf_hi.device))
+
+        if mu_log is not None:
+            flags = torch.as_tensor(mu_log, dtype=torch.bool).flatten()
+            if flags.shape != self.mu_log.shape:
+                raise ValueError(
+                    f"mu_log: expected {tuple(self.mu_log.shape)}, got {tuple(flags.shape)}"
+                )
+            self.mu_log.copy_(flags.to(self.mu_log.device))
+
+        install("x_lo",  "x_hi",  x_lo,  x_hi)
+        install("mu_lo", "mu_hi", mu_lo, mu_hi)
+
+    @staticmethod
+    def _rescale(v: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
+        return 2.0 * (v - lo) / (hi - lo) - 1.0
+
+    def _rescale_mu(self, mu: torch.Tensor) -> torch.Tensor:
+        """Rescale parameters, taking the logarithm of log-swept columns first."""
+        if self.mu_log.any():
+            mu = torch.where(self.mu_log, mu.clamp_min(1e-30).log(), mu)
+        return self._rescale(mu, self.mu_lo, self.mu_hi)
+
     def forward(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
         """
         Args:
@@ -234,6 +316,9 @@ class Net(nn.Module):
         Returns:
             dict: name → tensor (N, M)
         """
+        X  = self._rescale(X, self.x_lo, self.x_hi)
+        mu = self._rescale_mu(mu)
+
         if self.use_fourier:
             X = self.fourier(X)
 
@@ -313,7 +398,43 @@ class Net(nn.Module):
             if "activation" in out_cfg and out_cfg["activation"] is not None:
                 out_cfg["activation"] = deserialize_activation(out_cfg["activation"])
 
+        # Fields added after some checkpoints were written. Each default is the
+        # constant the network used before the field existed, so an old
+        # checkpoint reconstructs the architecture it was actually trained with.
+        cfg.setdefault("film_layers", 2)
+
         return cfg
+
+    RESCALE_BUFFERS = ("x_lo", "x_hi", "mu_lo", "mu_hi")
+
+    @staticmethod
+    def load_weights(net: "Net", state: dict) -> "Net":
+        """
+        Load a state dict, tolerating checkpoints written before input
+        rescaling existed.
+
+        Such a checkpoint was trained on raw coordinates, so its weights are
+        only meaningful with the identity map. Any rescaling already installed
+        on this Net is therefore reset rather than left in place — silently
+        keeping it would feed the old weights inputs they never saw.
+        """
+        missing, unexpected = net.load_state_dict(state, strict=False)
+
+        absent = set(missing) - set(Net.RESCALE_BUFFERS)
+        if absent or unexpected:
+            raise RuntimeError(
+                f"checkpoint does not match this architecture — "
+                f"missing {sorted(absent)}, unexpected {sorted(unexpected)}"
+            )
+
+        if missing:
+            for name in Net.RESCALE_BUFFERS:
+                getattr(net, name).fill_(-1.0 if name.endswith("_lo") else 1.0)
+            print(
+                "checkpoint predates input rescaling: reset to the identity map "
+                "so the loaded weights see the coordinates they were trained on"
+            )
+        return net
 
     @staticmethod
     def from_checkpoint(path: str, device="cpu") -> "Net":
@@ -323,6 +444,6 @@ class Net(nn.Module):
         ckpt = torch.load(path, map_location=device, weights_only=False)
         cfg  = Net.deserialize_config(ckpt["net_config"])
         net  = Net(**cfg)
-        net.load_state_dict(ckpt["net"])
+        Net.load_weights(net, ckpt["net"])
         net.to(device)
         return net
