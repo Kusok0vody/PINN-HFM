@@ -207,7 +207,7 @@ def run_arm(args, device, samp, make_net, make_physics, quality, path, m):
                 paired_coords=(path == "paired"), device=device)
     tr = Trainer(pinn=pinn, lr=1e-3, n_iter=args.steps,
                  resample_every=args.resample_every, checkpoint_every=10**9,
-                 gradnorm_every=200, lra_alpha=0.99, balancing="lra",
+                 gradnorm_every=200, lra_alpha=0.01, balancing="lra",
                  param_every=args.param_every, checkpoint_path="/tmp/bench_mu",
                  run_name="mu", save_final=False, logger="none", device=device,
                  progress=False, log_every=max(1, args.steps // 4))

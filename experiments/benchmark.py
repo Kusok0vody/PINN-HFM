@@ -262,9 +262,13 @@ def run_arm(problem, cfg, seed, steps, device):
     )
     ph = P["make_physics"](device)
     torch.manual_seed(seed + 10_000)
-    pinn = PINN(net, ph, P["samp"], n_refine=1, adaptive_pde=True, device=device)
+    # Explicit rather than defaulted: these sweeps were sized against the paired
+    # path's memory, and a change of default elsewhere must not silently move
+    # them onto the other one.
+    pinn = PINN(net, ph, P["samp"], n_refine=1, adaptive_pde=True,
+                paired_coords=True, device=device)
     tr = Trainer(pinn=pinn, lr=cfg["lr"], n_iter=steps, resample_every=1000,
-                 checkpoint_every=10 ** 9, gradnorm_every=200, lra_alpha=0.99,
+                 checkpoint_every=10 ** 9, gradnorm_every=200, lra_alpha=0.01,
                  balancing=cfg["balancing"], optimiser=cfg["optimiser"],
                  param_every=cfg["param_every"], checkpoint_path="/tmp/bench",
                  run_name="bench", save_final=False, logger="none", device=device, progress=False,

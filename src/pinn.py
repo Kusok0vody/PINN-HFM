@@ -20,7 +20,7 @@ class PINN(nn.Module):
         adaptive_bc:  bool = False,
         adaptive_ic:  bool = False,
         autoscale_inputs: bool = True,
-        paired_coords: bool = True,
+        paired_coords: bool = False,
         device="cpu"
         ):
         from geometry.sampler import Sampler, SampledPoints
@@ -187,13 +187,20 @@ class PINN(nn.Module):
         x11.9 at eight, and the broadcast path runs out of memory at sixteen
         where this one does not.
 
+        The flag is honoured whatever M is. At M = 1 the two layouts describe
+        the same computation — one leaf per point either way — and
+        derivative_batched then dispatches both to the same loop, which runs
+        exactly once. That is worth stating because the alternative, silently
+        ignoring the flag at M = 1, makes a run's configuration depend on how
+        many parameter settings it happened to be given.
+
         Returns:
             (unpacked, pred) — coordinate leaves and the prediction, both keyed
             so that Physics sees the same shapes either way.
         """
         from utils import unpack_coords_paired
 
-        if self.paired_coords and params.shape[0] > 1:
+        if self.paired_coords:
             unpacked, X = unpack_coords_paired(
                 coords, self.physics.has_time, self.physics.dim, params.shape[0]
             )
