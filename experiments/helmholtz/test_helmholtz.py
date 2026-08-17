@@ -1,72 +1,54 @@
+"""
+Picture of a trained Helmholtz run: network, exact solution, difference.
+
+Three panels rather than one, because a single field is unreadable on its own —
+the solution of this problem has eight lobes whose sign is opposite to the
+boundary datum above them and whose amplitude exceeds it, and none of that looks
+right until the exact solution is next to it.
+
+The figure comes from eval_helmholtz.plot_comparison, so the picture and the
+numbers can never drift apart.
+"""
 import sys
+import pathlib
+
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
 
-sys.path.append(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "src"))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
-from training.trainer import Trainer
-from physics.problems.helmholtz  import helmholtz2D_annulus
+from network.net import Net
+from geometry.geom import Geometry
+from geometry.sampler import Sampler
+from physics.problems.helmholtz import helmholtz2D_annulus
+from pinn import PINN
+
+from eval_helmholtz import build_bounds, plot_comparison, resolve_checkpoint
+
+CHECKPOINT = "checkpoints/helmholtz"     # a ckpt_<step>.pt or the directory
+KS         = [10.0]                      # must be what the run was trained on
+N          = 601                         # cartesian resolution of the figure
+OUTDIR     = "figures"
 
 torch.manual_seed(42)
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-print(device)
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print(f"Device: {device}")
 
-CHECKPOINT = "checkpoints/helmholtz/ckpt_20000.pt"
-net, step = Trainer.load_checkpoint(path=CHECKPOINT, device=device)
+path = resolve_checkpoint(CHECKPOINT)
+net  = Net.from_checkpoint(str(path), device=device)
 net.eval()
+step = torch.load(path, map_location="cpu", weights_only=False)["step"]
+print(f"checkpoint {path}, step {step}")
 
-N = 1000
-r = 1.0
-R = 3.0
-
-xs = torch.linspace(-R, R, N)
-ys = torch.linspace(-R, R, N)
-YY, XX = torch.meshgrid(ys, xs, indexing="ij")
-
-coords = torch.cat([YY.reshape(-1, 1), XX.reshape(-1, 1)], dim=1).to(device)
-
-parameters = [{"k": 5}]
-print(parameters)
-
+bounds  = build_bounds()
+samp    = Sampler(Geometry(bounds, dim=2, has_time=False), n_interior=16, n_boundary=8)
 physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
-physics.setParameters(
-    params=parameters,
-    boundaries={},
-)
+physics.setParameters(params=[{"k": k} for k in KS], boundaries=bounds)
 
-with torch.no_grad():
-    raw = net(coords, physics.par.tensor) 
-    u = raw["u"].squeeze(1).cpu().numpy()
+# The checkpoint carries the input rescaling it was trained under; recomputing
+# it here would silently feed the weights coordinates they never saw. Predicting
+# through PINN rather than calling net() applies the output transforms and the
+# hard-constraint ansatz, which the raw network output does not include.
+pinn = PINN(net, physics, samp, autoscale_inputs=False, device=device)
 
-u = u.reshape(N, N)
-
-XY = (XX**2 + YY**2)
-mask = ((XX**2 + YY**2).numpy() <= R**2)
-u_masked = np.where(mask, u, np.nan)
-
-plt.figure(figsize=(7, 6), dpi=150)
-
-im = plt.imshow(
-    u_masked,
-    origin="lower",
-    cmap="rainbow",
-    extent=[-R, R, -R, R],
-    interpolation="none"
-)
-
-plt.colorbar(im, label="u(x,y)")
-
-plt.title(f"PINN solution (Laplace ring), step {step}")
-plt.xlabel("x")
-plt.ylabel("y")
-
-plt.gca().set_aspect("equal")
-
-circle2 = plt.Circle((0, 0), R, color="black", fill=False, linewidth=1)
-plt.gca().add_patch(circle2)
-
-plt.savefig("helmholtz_annulus.png", bbox_inches="tight", dpi=300)
-plt.show()
-
-print("Saved --> helmholtz_annulus.png")
+for k in KS:
+    print(plot_comparison(pinn, k, N, OUTDIR, device))
