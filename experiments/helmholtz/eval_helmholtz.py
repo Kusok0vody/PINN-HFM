@@ -113,6 +113,72 @@ def ring(rad, n, device):
     return torch.stack([y, x], 1).to(device), th
 
 
+def plot_comparison(pinn, k, n, outdir, device):
+    """
+    Network, exact solution and their difference, side by side.
+
+    Everything outside the annulus is masked. The network does produce values
+    in the hole, but there is no equation there, no collocation points and no
+    boundary condition, so those values mean nothing and drawing them invites
+    reading a pattern into pure extrapolation.
+
+    The first two panels share one colour scale, so their colours are directly
+    comparable; the difference gets its own symmetric scale, since it is
+    typically an order of magnitude smaller and would otherwise be a uniform
+    green square.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    g = np.linspace(-R, R, n)
+    X, Y = np.meshgrid(g, g, indexing="xy")
+    rho = np.hypot(X, Y)
+    inside = (rho >= r) & (rho <= R)
+
+    exact = helmholtz_annulus(X, Y, k, r, R, N_ARCS)          # NaN outside already
+
+    coords = torch.stack(
+        [torch.as_tensor(Y.ravel(), dtype=torch.float32),
+         torch.as_tensor(X.ravel(), dtype=torch.float32)], 1
+    ).to(device)
+    mu = torch.tensor([[k]], dtype=torch.float32, device=device)
+    with torch.no_grad():
+        u = pinn.predict(coords, mu)["u"][:, 0].cpu().numpy().reshape(X.shape)
+    u = np.where(inside, u, np.nan)
+
+    diff = u - exact
+    lim  = np.nanmax(np.abs(exact))
+    dlim = np.nanmax(np.abs(diff))
+    th   = np.linspace(0, 2 * math.pi, 400)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.8))
+    panels = [
+        (u,     "PINN",                       "jet",    -lim,  lim),
+        (exact, "exact",                       "jet",    -lim,  lim),
+        (diff,  "PINN - exact",                "RdBu_r", -dlim, dlim),
+    ]
+    for ax, (field, title, cmap, lo, hi) in zip(axes, panels):
+        m = ax.pcolormesh(X, Y, field, cmap=cmap, vmin=lo, vmax=hi, shading="auto")
+        for rad in (r, R):
+            ax.plot(rad * np.cos(th), rad * np.sin(th), "k", lw=0.8)
+        ax.set_aspect("equal")
+        ax.set_title(title)
+        ax.set_xlabel("x")
+        fig.colorbar(m, ax=ax, fraction=0.046)
+    axes[0].set_ylabel("y")
+    fig.suptitle(f"k = {k}   max|exact| = {lim:.3f}   max|error| = {dlim:.3f}")
+    fig.tight_layout()
+
+    outdir = pathlib.Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / f"helmholtz_k{k:g}.png"
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True,
@@ -122,6 +188,11 @@ def main():
                     help="parameter settings to evaluate; must match what was trained")
     ap.add_argument("--n-rho", type=int, default=80)
     ap.add_argument("--n-theta", type=int, default=256)
+    ap.add_argument("--plot", nargs="?", const="figures", default=None,
+                    help="also write a PINN / exact / difference figure per k, "
+                         "into this directory (default 'figures')")
+    ap.add_argument("--plot-n", type=int, default=401,
+                    help="cartesian resolution of the figure")
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -203,6 +274,9 @@ def main():
                 continue
             print(f"    {lo:.1f} <= rho < {hi:.1f}   rel L2 {relative_l2(u[m], ref[m]):.4f}"
                   f"   max err {max_abs_error(u[m], ref[m]):.4f}")
+        if args.plot is not None:
+            print(f"  figure               "
+                  f"{plot_comparison(pinn, k, args.plot_n, args.plot, device)}")
         print()
 
 
