@@ -157,7 +157,30 @@ def problem_helmholtz(k_min=1.0, k_max=12.0, R=3.0, r=1.0, n_arcs=8):
                 var="u", x_dim=2, mu_dim=1)
 
 
-PROBLEMS = {"cdr": problem_cdr, "convection": problem_convection, "helmholtz": problem_helmholtz}
+# Keyed by PDE type as well as by name, because that is the axis along which
+# behaviour actually seems to differ. Note what the table does NOT let you do:
+# every elliptic entry is 2D and every clean hyperbolic entry is 1D, so type and
+# dimension are perfectly confounded. A result that looks like "elliptic behaves
+# differently" is equally consistent with "2D behaves differently", and nothing
+# here can separate them — dim > 2 is not supported by the geometry layer at all
+# (boundaries are parametric curves, the inside-test casts rays in the plane).
+#
+# cdr_advective and cdr_parabolic are the same equation at two values of nu:
+# at 0.01 transport dominates and the solution steepens, at 1.0 diffusion does
+# and it smooths. Same code, same analytic reference, opposite character.
+PROBLEMS = {
+    "cdr":            problem_cdr,                                 # parabolic, transport-dominated
+    "cdr_advective":  lambda: problem_cdr(nu=0.01),                # parabolic in form, hyperbolic in behaviour
+    "cdr_parabolic":  lambda: problem_cdr(nu=1.0, sigma=math.pi/4),# diffusion-dominated
+    "convection":     problem_convection,                          # hyperbolic
+    "helmholtz":      problem_helmholtz,                           # elliptic
+}
+
+PDE_TYPE = {
+    "cdr": "parabolic/transport", "cdr_advective": "parabolic/transport",
+    "cdr_parabolic": "parabolic/diffusive", "convection": "hyperbolic",
+    "helmholtz": "elliptic",
+}
 
 
 # --------------------------------------------------------------------------
@@ -165,25 +188,38 @@ PROBLEMS = {"cdr": problem_cdr, "convection": problem_convection, "helmholtz": p
 # --------------------------------------------------------------------------
 
 BASE = dict(dx=32, dmu=32, d_h=64, encoder_layers=2, trunk_layers=3,
-            head_layers=2, film_layers=2, use_film=True,
-            optimiser="nadam", balancing="lra", param_every=100, lr=1e-3)
+            head_layers=2, film_layers=1, use_film=True,
+            optimiser="nadam", balancing="lra", param_every=100, lr=1e-3,
+            scheduler="plateau", sched_patience=2000)
 
 SWEEPS = {
     "arch": [(f"{k}={v}", {k: v}) for k, vals in [
         ("dx", [16, 32, 64]), ("dmu", [8, 32, 64]), ("d_h", [32, 64, 128]),
         ("encoder_layers", [2, 3]), ("trunk_layers", [2, 3, 5]), ("head_layers", [2, 3]),
     ] for v in vals],
-    # film_layers stays >= 2 so the generator keeps its activation: at 1 it is a
-    # bare Linear and the block is tested in its weakest possible form.
-    "film": [("film on",  {"use_film": True,  "film_layers": 2}),
-             ("film off", {"use_film": False}),
-             ("film deep", {"use_film": True, "film_layers": 3}),
-             ("dmu=8",    {"dmu": 8}), ("dmu=64", {"dmu": 64})],
+    # At film_layers=1 the generator is a bare Linear and film_activation is
+    # unused. That is not a defect to design around: both a local sweep (x1.5 in
+    # its favour) and the author's own experiments say one layer beats more.
+    # encoder_mu is already an MLP, so a nonlinearity in front of the modulation
+    # is redundant, and the block is initialised to the exact identity
+    # (gamma = 1, beta = 0) — extra depth only puts that initialisation further
+    # from the trunk. The sweep therefore starts at 1 and asks whether depth
+    # hurts, rather than assuming it helps.
+    "film": [("film off",      {"use_film": False}),
+             ("film 1 layer",  {"use_film": True, "film_layers": 1}),
+             ("film 2 layers", {"use_film": True, "film_layers": 2}),
+             ("film 3 layers", {"use_film": True, "film_layers": 3}),
+             ("dmu=8",         {"dmu": 8}), ("dmu=64", {"dmu": 64})],
     "optimiser": [("nadam lr=1e-3",   {"optimiser": "nadam", "lr": 1e-3}),
                   ("nadam lr=1e-4",   {"optimiser": "nadam", "lr": 1e-4}),
                   ("hypergrad",       {"optimiser": "hypergrad"}),
                   ("hypergrad lr0=1e-5", {"optimiser": "hypergrad", "lr": 1e-5})],
     "balancing": [("lra", {"balancing": "lra"}), ("none", {"balancing": "none"})],
+    "scheduler": [("plateau p=2000", {"scheduler": "plateau", "sched_patience": 2000}),
+                  ("plateau p=1000", {"scheduler": "plateau", "sched_patience": 1000}),
+                  ("cosine",         {"scheduler": "cosine"}),
+                  ("none",           {"scheduler": "none"}),
+                  ("hypergrad",      {"optimiser": "hypergrad", "scheduler": "none"})],
     "sweeprate": [(f"param_every={v}", {"param_every": v}) for v in (0, 100, 500)],
 }
 
@@ -218,8 +254,10 @@ def run_arm(problem, cfg, seed, steps, device):
         head_layers=cfg["head_layers"], film_layers=cfg["film_layers"],
         activation=ActivationFactory(Sine, omega=1.0, trainable=True),
         encoder_activation=nn.Tanh, film_activation=nn.Tanh,
+        # CDR is posed in mixed form: it predicts u and ux separately and ties
+        # them with a coupling residual, so it needs the extra head.
         outputs_config=({"u": {"activation": nn.Tanh}, "ux": {"activation": nn.Tanh}}
-                        if problem == "cdr" else {"u": {"activation": nn.Tanh}}),
+                        if problem.startswith("cdr") else {"u": {"activation": nn.Tanh}}),
         use_film=cfg["use_film"], use_fourier=False,
     )
     ph = P["make_physics"](device)
@@ -230,7 +268,9 @@ def run_arm(problem, cfg, seed, steps, device):
                  balancing=cfg["balancing"], optimiser=cfg["optimiser"],
                  param_every=cfg["param_every"], checkpoint_path="/tmp/bench",
                  run_name="bench", save_final=False, logger="none", device=device, progress=False,
-                 log_every=max(1, steps // 10))
+                 log_every=max(1, steps // 10),
+                 scheduler=cfg.get("scheduler", "plateau"),
+                 sched_patience=cfg.get("sched_patience", 2000))
     t0 = time.time()
     tr.train()
     wall = time.time() - t0
@@ -247,7 +287,7 @@ def run_arm(problem, cfg, seed, steps, device):
         "grid": grid.tolist(),
         "wall_s": round(wall, 1),
         "n_params": sum(p.numel() for p in net.parameters()),
-        "final_lr": getattr(tr.optimiser, "last_eta", cfg["lr"]),
+        "final_lr": tr.optimiser.param_groups[0]["lr"],   # what it ended at, not what it started at
     }
 
 

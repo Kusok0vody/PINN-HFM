@@ -62,6 +62,10 @@ class Trainer:
         optimiser:        str   = "nadam",
         progress:         bool  = True,
         log_every:        int   = 0,
+        scheduler:        str   = "plateau",
+        sched_patience:   int   = 2000,
+        sched_factor:     float = 0.5,
+        min_lr:           float = 1e-6,
     ):
         self.run_name        = run_name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.save_final      = save_final
@@ -104,12 +108,30 @@ class Trainer:
             )
         self.optimiser_kind = optimiser
 
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimiser,
-            patience=1000,
-            factor=0.5,
-            min_lr=1e-6,
-        )
+        # The plateau scheduler watches the training loss, which here jumps
+        # whenever the collocation pool is redrawn, the loss weights are
+        # rebalanced or the physics parameters are resampled. Measured on CDR
+        # the median step-to-step change is ~3 percent, so a short patience
+        # detects that noise rather than a real plateau: at patience=1000 the
+        # rate fell from 1e-3 to min_lr by step 12000 of 20000, and the rest of
+        # the run did nothing. Hence the longer default, and the option to turn
+        # scheduling off entirely.
+        if scheduler == "plateau":
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimiser, patience=sched_patience,
+                factor=sched_factor, min_lr=min_lr,
+            )
+        elif scheduler == "cosine":
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimiser, T_max=max(n_iter, 1), eta_min=min_lr,
+            )
+        elif scheduler == "none":
+            self.scheduler = None
+        else:
+            raise ValueError(
+                f"unknown scheduler '{scheduler}'; choose 'plateau', 'cosine' or 'none'"
+            )
+        self.scheduler_kind = scheduler
 
         self._init_logger()
 
@@ -304,7 +326,12 @@ class Trainer:
 
             total.backward()
             self.optimiser.step()
-            self.scheduler.step(total.item())
+            if self.scheduler is not None:
+                # cosine steps on the iteration count, plateau on the metric
+                if self.scheduler_kind == "plateau":
+                    self.scheduler.step(total.item())
+                else:
+                    self.scheduler.step()
 
             self._log(step, loss_terms, total.item())
 

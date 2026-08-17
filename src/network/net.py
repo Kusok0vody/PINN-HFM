@@ -206,11 +206,14 @@ class Net(nn.Module):
         # activations runs zero times. Any activation configured for such a
         # block is silently discarded, which is easy to miss when a head is
         # given a Morlet or Sine and quietly gets none.
+        # film_layers is deliberately excluded: one layer is its useful setting,
+        # measured better than deeper generators, so warning about it would fire
+        # on every sensible run. The consequence — film_activation does nothing
+        # at film_layers = 1 — is documented on the argument instead.
         degenerate = [
             name for name, n in (("encoder_layers", encoder_layers),
                                  ("trunk_layers",   trunk_layers),
-                                 ("head_layers",    head_layers),
-                                 ("film_layers",    film_layers if use_film else 2))
+                                 ("head_layers",    head_layers))
             if n < 2
         ]
         if degenerate:
