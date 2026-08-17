@@ -27,7 +27,14 @@ class Trainer:
         logger:           "tqdm" or "tensorboard"
         device:           "cpu" or "cuda"
         gradnorm_every:   rebalance loss weights every K iterations
-        lra_alpha:        EMA rate for the loss-weight update
+        lra_alpha:        weight given to the freshly measured ratio when
+                          updating a balancing weight, so small means heavy
+                          smoothing. Kept in this direction because six
+                          experiment scripts already pass 0.01 and flipping
+                          the sense silently turns strong smoothing into none
+        weight_min,
+        weight_max:       clamp on the balancing weights; the LRA ratio is
+                          unbounded and diverges without it
         param_every:      resample physics parameters every K iterations (0 = never)
         validator:        Validator instance, or None to skip validation
         validate_every:   run the validator every K iterations (0 = never)
@@ -54,11 +61,13 @@ class Trainer:
         save_final:       bool  = True,
         start_step:       int   = 0,
         gradnorm_every:   int   = 200,
-        lra_alpha:        float = 0.9,
+        lra_alpha:        float = 0.01,
         param_every:      int   = 0,
         validator               = None,
         validate_every:   int   = 0,
         balancing:        str   = "lra",
+        weight_max:       float = 100.0,
+        weight_min:       float = 0.01,
         optimiser:        str   = "nadam",
         progress:         bool  = True,
         log_every:        int   = 0,
@@ -88,6 +97,8 @@ class Trainer:
         self.balancing        = balancing
         self.gradnorm_every   = gradnorm_every
         self.lra_alpha        = lra_alpha
+        self.weight_max       = weight_max
+        self.weight_min       = weight_min
 
         self.adaptive_weights = {}
         self._weights_initialized = False
@@ -165,42 +176,46 @@ class Trainer:
 
     def _update_weights_lra(self, residuals: dict):
         """
-        Learning Rate Annealing, Wang et al., as given in Bischof & Kraus Eq. (6):
+        Gradient-statistics balancing, a bounded variant of Learning Rate
+        Annealing (Wang et al.):
 
-            lambda_hat_i(t) = max|grad_theta L_Omega(t)| / mean|grad_theta L_i(t)|
-            lambda_i(t)     = alpha lambda_i(t-1) + (1 - alpha) lambda_hat_i(t)
+            lambda_hat_i = mean_j ||grad_theta L_j|| / ||grad_theta L_i||
+            lambda_i(t)  = (1 - alpha) lambda_i(t-1) + alpha clamp(lambda_hat_i)
 
-        The governing-equation loss L_Omega is the reference and keeps weight 1;
-        only the boundary, initial and data terms are rescaled. Note the
-        statistics are a max and a mean over gradient *entries*, not L2 norms —
-        the two differ substantially once the parameter count is large.
+        Every term is compared on the same statistic — the L2 norm of its
+        gradient — and pulled towards the average of them all.
 
-        Where the paper assumes a single L_Omega, a system contributes several
-        PDE residuals; their sum is used as the reference, which is the loss the
-        governing equations actually pose.
+        This deviates from Eq. (6) of Bischof & Kraus, which divides the *max*
+        entry of the governing term's gradient by the *mean* entry of term i's.
+        That form was tried and reverted. Two reasons, both measured on the
+        Helmholtz annulus: the max/mean mismatch inflates every weight by the
+        ratio between those statistics, here 38x; and the paper's examples carry
+        two to four loss terms while this problem carries seventeen, so the
+        boundary side ends up outweighing the equation by four orders of
+        magnitude. Weights reached a median of 3.6e3 against 6.2 here, training
+        diverged, and the holdout residual climbed two hundredfold. The paper
+        itself names the unboundedness as LRA's weakness and reports a problem
+        it could not train at all.
 
-        Despite its name this schedules the loss weights, not the learning rate.
+        Despite the name this schedules the loss weights, not the learning rate.
         """
         params = [p for p in self.pinn.net.parameters() if p.requires_grad]
         losses = self._term_losses(residuals)
-
-        pde_terms = [v for k, v in losses.items() if k.startswith("pde/")]
-        if not pde_terms:
+        if not losses:
             return
-        ref = self._flat_grad(sum(pde_terms), params)
-        num = ref.abs().max().item()
 
-        for key, loss in losses.items():
-            if key.startswith("pde/"):
-                self.adaptive_weights[key] = 1.0
+        norms = {key: self._flat_grad(loss, params).norm().item()
+                 for key, loss in losses.items()}
+        mean_norm = sum(norms.values()) / len(norms)
+
+        for key, norm in norms.items():
+            if norm < 1e-12:
                 continue
-            den = self._flat_grad(loss, params).abs().mean().item()
-            if den < 1e-12 or num < 1e-12:
-                continue
-            lam_hat = num / den
-            old     = self.adaptive_weights.get(key, 1.0)
+            lam_hat = min(max(mean_norm / (norm + 1e-8), self.weight_min),
+                          self.weight_max)
+            old = self.adaptive_weights.get(key, 1.0)
             self.adaptive_weights[key] = (
-                self.lra_alpha * old + (1.0 - self.lra_alpha) * lam_hat
+                (1.0 - self.lra_alpha) * old + self.lra_alpha * lam_hat
             )
 
         self.optimiser.zero_grad()
