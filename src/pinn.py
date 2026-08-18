@@ -256,15 +256,27 @@ class PINN(nn.Module):
     # full-sized residual.
     SCALE_FLOOR = 1e-6
 
-    def _field_scale(self, pred: dict) -> torch.Tensor:
+    def _field_scale(self, pred: dict, detach: bool = True) -> torch.Tensor:
         """
-        Per-setting size of the predicted solution, (M,), detached.
+        Per-setting size of the predicted solution, (M,).
 
-        Detached on purpose: this is a unit, not a term of the objective. Left
-        attached, the optimiser would notice that shrinking the field shrinks
-        the denominator and could chase the ratio instead of the physics.
+        The divisor keeps its graph when it is used to descale, and that is not
+        a detail. Detached, the ratio is invariant in value but not in
+        gradient: d/dg (r / s_det) = r / s, a push towards a smaller field that
+        does not weaken as the field shrinks. The boundary term, the only thing
+        pulling the amplitude back up, has a gradient proportional to the
+        output itself and dies out as the field vanishes. A run with that
+        combination walks into u = 0 and stops — measured, not feared: 30000
+        steps ending at exactly zero, residual 2e-9, boundary error exactly 1.
+
+        Attached, the ratio is homogeneous of degree zero in the field, so the
+        equation term has no opinion about amplitude at all and the boundary
+        data set it alone. The cost is that the ratio can also be reduced by
+        inflating the field with something the equation does not charge for —
+        a near-eigenmode — which the boundary term then has to hold in check.
         """
-        sq = torch.stack([v.detach().pow(2).mean(dim=0) for v in pred.values()])
+        sq = torch.stack([(v.detach() if detach else v).pow(2).mean(dim=0)
+                          for v in pred.values()])
         return sq.mean(dim=0).sqrt().clamp_min(self.SCALE_FLOOR)
 
     def _descale(self, residuals: dict, scale: torch.Tensor = None) -> dict:
@@ -279,6 +291,7 @@ class PINN(nn.Module):
         linear, so alpha*u solves it exactly for any alpha, and only the
         boundary term objects. Dividing here removes A from that comparison, so
         the optimum in alpha sits at 1 regardless of how large the solution is.
+        See _field_scale for why the divisor keeps its graph.
 
         Boundary and initial residuals are deliberately left alone. Their
         natural scale is the data they are matched against, which is already
@@ -311,8 +324,10 @@ class PINN(nn.Module):
         # --- PDE ---
         pde_coords, pred_pde = self._evaluate(self.points.interior.coords, parameters)
         res_pde    = self.physics.residualPDE(pred_pde, pde_coords)
-        self.last_scale = self._field_scale(pred_pde)
-        res_pde    = self._descale(res_pde)
+        # Attached for the division, detached for reporting.
+        scale           = self._field_scale(pred_pde, detach=not self.scale_free_pde)
+        self.last_scale = scale.detach()
+        res_pde    = self._descale(res_pde, scale)
 
         # --- BC ---
         res_bc_raw = {}

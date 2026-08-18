@@ -255,6 +255,38 @@ class Trainer:
 
         return total, loss_terms
 
+    # A field this much smaller than the one training started with is not a
+    # solution in progress. The threshold is loose on purpose: legitimate early
+    # transients move the amplitude by a factor of a few, not by a thousand.
+    COLLAPSE_FACTOR = 1e-3
+
+    def _check_collapse(self, step: int):
+        """
+        Say something when the solution is on its way to zero.
+
+        u = 0 satisfies any linear homogeneous equation exactly, so a run that
+        has collapsed reports a beautiful residual and a loss that stops moving,
+        and looks from the outside like a run that converged. Worse, with a
+        multiplicative output scale every gradient is proportional to the output
+        itself, so the gradients vanish along with the field and the run cannot
+        climb back out on its own. There is nothing to do but notice.
+        """
+        amp = float(self.pinn.last_scale.max())
+        if getattr(self, "_amp0", None) is None:
+            self._amp0 = amp
+            self._collapse_reported = False
+            return
+        if (not self._collapse_reported
+                and self._amp0 > 0.0 and amp < self.COLLAPSE_FACTOR * self._amp0):
+            self._collapse_reported = True
+            print("")
+            print(f"Trainer: at step {step} the solution has shrunk to "
+                  f"{amp:.2e}, {self._amp0 / max(amp, 1e-30):.0f}x smaller than "
+                  f"at the start. u = 0 solves a linear homogeneous equation "
+                  f"exactly and is a fixed point of a multiplicative output "
+                  f"scale; the residual will look excellent from here on.",
+                  flush=True)
+
     def _log(self, step: int, loss_terms: dict, total: float):
         if self.logger_type == "tensorboard":
             self.writer.add_scalar("loss/total", total, step)
@@ -394,6 +426,9 @@ class Trainer:
                 "loss": f"{total.item():.3e}",
                 "lr":   f"{self.optimiser.param_groups[0]['lr']:.2e}",
             }
+            if self.pinn.last_scale is not None:
+                postfix["|u|"] = f"{self.pinn.last_scale.max():.2e}"
+                self._check_collapse(step)
             for name, val in self.last_metrics.items():
                 if name.startswith("l2/"):
                     postfix[name] = f"{val:.3e}"

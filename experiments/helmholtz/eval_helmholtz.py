@@ -89,6 +89,20 @@ def pde_residual(pinn, coords, mu, chunk):
     return torch.cat(out, dim=0)
 
 
+def checkpoint_series(spec, every):
+    """All ckpt_<step>.pt under a directory, in step order, every Nth."""
+    path = pathlib.Path(spec)
+    if not path.is_dir():
+        raise SystemExit(f"--history needs the checkpoint directory, got {spec}")
+    found = []
+    for p in path.glob("ckpt_*.pt"):
+        try:
+            found.append((int(p.stem.split("_")[-1]), p))
+        except ValueError:
+            continue
+    return sorted(found)[::every]
+
+
 def resolve_checkpoint(spec):
     """
     Accept either a file or a directory of ckpt_<step>.pt.
@@ -201,6 +215,44 @@ def plot_comparison(pinn, k, n, outdir, device):
     return path
 
 
+def history(args, device, bounds, samp, physics):
+    """
+    Amplitude ratio and relative L2 through training, from saved checkpoints.
+
+    The final checkpoint cannot say whether the field was pushed down early and
+    climbed back, or simply never got there — and with a scale-free residual
+    those are different diagnoses with different fixes. Only the predictions are
+    needed here, so no residual and no figures: one forward pass per checkpoint.
+    """
+    series = checkpoint_series(args.ckpt, args.history)
+    if not series:
+        raise SystemExit(f"no checkpoints under {args.ckpt}")
+
+    coords, rho, gx, gy = polar_grid(args.n_rho, args.n_theta, device)
+    mu   = torch.tensor([[k] for k in args.k], dtype=torch.float32, device=device)
+    refs = [torch.as_tensor(helmholtz_annulus(gx.numpy(), gy.numpy(), k, r, R, N_ARCS),
+                            dtype=torch.float32) for k in args.k]
+    ref_rms = [q.pow(2).mean().sqrt() for q in refs]
+
+    print(f"{len(series)} checkpoints, steps {series[0][0]}..{series[-1][0]}")
+    print("amplitude ratio (rms PINN / rms exact), then relative L2\n")
+    head = "".join(f"{'k=' + f'{k:g}':>10}" for k in args.k)
+    print(f"{'step':>7}{head}   |{head}")
+
+    for step, path in series:
+        net  = Net.from_checkpoint(str(path), device=device)
+        net.eval()
+        pinn = PINN(net, physics, samp, autoscale_inputs=False,
+                    paired_coords=True, device=device)
+        with torch.no_grad():
+            pred = pinn.predict(coords, mu)["u"].cpu()
+        amp = [f"{pred[:, j].pow(2).mean().sqrt() / ref_rms[j]:10.3f}"
+               for j in range(len(args.k))]
+        l2  = [f"{relative_l2(pred[:, j], refs[j]):10.3f}"
+               for j in range(len(args.k))]
+        print(f"{step:>7}{''.join(amp)}   |{''.join(l2)}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True,
@@ -222,6 +274,11 @@ def main():
                     help="points per chunk when computing the PDE residual; the "
                          "second-order graph is what fills the card, so lower "
                          "this before lowering the grid")
+    ap.add_argument("--history", type=int, default=0, metavar="EVERY",
+                    help="instead of one report, trace amplitude ratio and "
+                         "relative L2 across every EVERY-th checkpoint in the "
+                         "directory. Answers whether the field recovers after "
+                         "an early dip, which a final checkpoint cannot.")
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -240,17 +297,20 @@ def main():
                   f"solution is amplified there and the errors below will be large "
                   f"for reasons that have nothing to do with training")
 
-    path = resolve_checkpoint(args.ckpt)
-    net  = Net.from_checkpoint(str(path), device=device)
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    print(f"checkpoint {path}, step {ckpt['step']}, run '{ckpt.get('run_name')}'")
-
     bounds = build_bounds()
     geo    = Geometry(bounds, dim=2, has_time=False)
     samp   = Sampler(geo, n_interior=1024, n_boundary=64)
 
     physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
     physics.setParameters(params=[{"k": k} for k in args.k], boundaries=bounds)
+
+    if args.history > 0:
+        return history(args, device, bounds, samp, physics)
+
+    path = resolve_checkpoint(args.ckpt)
+    net  = Net.from_checkpoint(str(path), device=device)
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    print(f"checkpoint {path}, step {ckpt['step']}, run '{ckpt.get('run_name')}'")
 
     # The checkpoint carries its own input rescaling; recomputing it here would
     # overwrite the map the weights were trained under whenever this script's
