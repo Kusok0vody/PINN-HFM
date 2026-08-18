@@ -319,7 +319,11 @@ class Trainer:
                 "net":        self.pinn.net.state_dict(),
                 "net_config": self.pinn.net.serialize_config(),
                 "optimiser":  self.optimiser.state_dict(),
-                "scheduler":  self.scheduler.state_dict(),
+                # scheduler="none" leaves nothing to save, and step 0 is always
+                # a checkpoint step, so without this the option crashes on its
+                # first use rather than at some later moment.
+                "scheduler":  (self.scheduler.state_dict()
+                               if self.scheduler is not None else None),
                 "points":     self.pinn.points,
             },
             f"{self.checkpoint_path}/ckpt_{step}.pt",
@@ -350,7 +354,7 @@ class Trainer:
 
         if optimiser is not None:
             optimiser.load_state_dict(ckpt["optimiser"])
-        if scheduler is not None:
+        if scheduler is not None and ckpt.get("scheduler") is not None:
             scheduler.load_state_dict(ckpt["scheduler"])
         if pinn is not None and ckpt.get("points") is not None:
             pinn.points = ckpt["points"]
