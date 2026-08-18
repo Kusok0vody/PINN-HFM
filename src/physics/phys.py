@@ -140,7 +140,7 @@ class Physics(ABC):
             for name, val in pred.items()
         }
         
-    def draw_parameters(self, n: int = None) -> list[dict]:
+    def draw_parameters(self, n: int = None, anchor_ends: bool = True) -> list[dict]:
         """
         Draw n parameter settings from the declared limits, without installing
         them. Parameters with no limits keep their current value.
@@ -159,7 +159,13 @@ class Physics(ABC):
         n = sizes.pop() if n is None else n
         new_params = [{} for _ in range(n)]
 
-        for key, lim in self.limits.items():
+        n_axes = len(self.limits)
+        if anchor_ends and n < 2 * n_axes:
+            print(f"Physics: {n} settings is fewer than the {2 * n_axes} needed "
+                  f"to pin both ends of {n_axes} swept parameters, so the ends "
+                  f"are left to the random draw and will never be hit exactly.")
+
+        for axis_index, (key, lim) in enumerate(self.limits.items()):
             lo, hi = float(lim["min"]), float(lim["max"])
             # "linear" is the safe default: a log sweep needs a positive lower
             # bound, and min = 0 is common enough that defaulting to log turns
@@ -175,6 +181,30 @@ class Physics(ABC):
                 vals = torch.exp(torch.rand(n) * (log(hi) - log(lo)) + log(lo))
             else:
                 vals = torch.rand(n) * (hi - lo) + lo
+
+            # Pin the ends of every axis into the batch.
+            #
+            # A uniform draw never returns min or max, so the boundary of the
+            # declared sweep is the one place the network is always
+            # extrapolating: an interior value has neighbours on both sides, an
+            # endpoint has them on one. Measured on the Helmholtz annulus swept
+            # over [1, 6], the amplitude ratio ran 0.95 at k = 5 and 0.45 at
+            # k = 6, while the same k = 6 sat at 0.61 when it was interior to a
+            # [1, 10] sweep — the same solution, a quarter worse for standing on
+            # the edge.
+            #
+            # It also matters for the input rescaling, which maps [min, max] to
+            # [-1, 1]: without this the network never sees an input of exactly
+            # +-1, which is the range its initialisation is designed for.
+            #
+            # Two slots per axis, taken from the random ones. With one swept
+            # parameter that is the two endpoints; with several it puts one
+            # setting on each face of the box rather than trying to cover its
+            # 2^d corners, which would consume the whole batch by four
+            # parameters.
+            if anchor_ends and n >= 2 * n_axes:
+                i = axis_index * 2
+                vals[i], vals[i + 1] = lo, hi
 
             for i, v in enumerate(vals.tolist()):
                 new_params[i][key] = v

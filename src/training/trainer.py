@@ -90,9 +90,10 @@ class Trainer:
         self.log_every        = log_every
         self.start_step       = start_step
 
-        if balancing not in ("lra", "none"):
+        if balancing not in ("lra", "ntk", "none"):
             raise ValueError(
-                f"unknown balancing scheme '{balancing}'; choose 'lra' or 'none'"
+                f"unknown balancing scheme '{balancing}'; choose 'lra', 'ntk' "
+                f"or 'none'"
             )
         self.balancing        = balancing
         self.gradnorm_every   = gradnorm_every
@@ -120,6 +121,17 @@ class Trainer:
                   f"param_every = 0, so the sweep is never drawn and training "
                   f"stays on the {pinn.physics.par.tensor.shape[0]} settings "
                   f"passed to setParameters.")
+        elif not limits and pinn.physics.par.tensor.shape[0] > 1:
+            # Legitimate on its own — a fixed set of settings is a valid run —
+            # but it is also what a script looks like when it computed limits
+            # and forgot to pass them, which is invisible from here: the physics
+            # simply has no sweep. Stating the fact costs one line and is the
+            # difference between "trained on a family" and "trained on ten
+            # points", which are read from the same plots.
+            print(f"Trainer: training on a fixed set of "
+                  f"{pinn.physics.par.tensor.shape[0]} parameter settings, with "
+                  f"no sweep. Pass limits=... to setParameters and param_every "
+                  f"to resample them.")
 
         self.validator      = validator
         self.validate_every = validate_every
@@ -190,6 +202,86 @@ class Trainer:
             for group, res_dict in residuals.items()
             for name, res in res_dict.items()
         }
+
+    # Probes for the Hutchinson trace estimate, one backward pass each per term
+    # per rebalance. Measured against an exact trace (one backward per residual
+    # entry) on the Helmholtz annulus, the spread between repeats is 57 percent
+    # at one probe, 70 at four, 30 at sixteen and 8 at sixty-four; the estimator
+    # is unbiased, so this is variance rather than error. Sixteen sits where the
+    # remaining noise is well inside what lra_alpha smooths away over the
+    # hundreds of rebalances in a run, without paying four times over for it.
+    NTK_PROBES = 16
+
+    def _trace_ntk(self, residual: torch.Tensor, params: list) -> float:
+        """
+        tr(K) for one loss term, where K is its neural tangent kernel,
+        K[a, b] = grad_w r_a . grad_w r_b over the term's residual entries.
+
+        The trace is the sum over entries of ||grad_w r_a||^2, so computing it
+        exactly needs one backward pass per collocation point. It is estimated
+        instead from
+
+            tr(K) = tr(J J^T) = E_v || J^T v ||^2,   v of independent +-1,
+
+        which is Hutchinson's identity: E[v v^T] = I, so E[v^T J J^T v] is the
+        trace. Each probe is a single backward pass on the scalar v . r.
+
+        Why this is not the same statistic as LRA's. LRA takes the norm of
+        grad_w of the aggregated loss, that is J^T weighted by the residual and
+        summed before the norm; entries whose gradients point in opposite
+        directions cancel there, and a term every one of whose points is
+        pulling hard can still report a small number. The trace squares before
+        summing and cannot cancel. On a solution that changes sign across the
+        domain — this Helmholtz has eight alternating lobes — the two are not
+        interchangeable.
+        """
+        flat  = residual.reshape(-1)
+        total = 0.0
+        for _ in range(self.NTK_PROBES):
+            v = torch.randint(0, 2, flat.shape, device=flat.device,
+                              dtype=flat.dtype) * 2.0 - 1.0
+            total += self._flat_grad(flat.dot(v), params).pow(2).sum().item()
+        return total / self.NTK_PROBES
+
+    def _update_weights_ntk(self, residuals: dict):
+        """
+        Balancing by the traces of the per-term NTK blocks.
+
+        Training dynamics under gradient descent are e' = -K e, so the
+        eigenvalues of K are the rates at which the error components decay and
+        tr(K_i) measures how much motion term i is capable of at all. Equalising
+        the traces equalises those rates, which is what Wang, Yu and Perdikaris
+        propose:
+
+            lambda_i = tr(K_total) / tr(K_i)
+
+        The form used here is mean_j tr(K_j) / tr(K_i), which differs by the
+        constant factor of the number of terms. That scales every weight
+        identically, so it rescales the total loss and nothing else — under Adam
+        that is invisible — and it keeps the numbers on the same footing as the
+        LRA branch, so the clamps and lra_alpha mean the same thing in both.
+        """
+        params = [p for p in self.pinn.net.parameters() if p.requires_grad]
+        flat_res = {f"{group}/{name}": res
+                    for group, res_dict in residuals.items()
+                    for name, res in res_dict.items()}
+        if not flat_res:
+            return
+
+        traces = {key: self._trace_ntk(res, params) for key, res in flat_res.items()}
+        mean_trace = sum(traces.values()) / len(traces)
+
+        for key, tr in traces.items():
+            if tr < 1e-12:
+                continue
+            lam_hat = min(max(mean_trace / (tr + 1e-8), self.weight_min),
+                          self.weight_max)
+            old = self.adaptive_weights.get(key, 1.0)
+            self.adaptive_weights[key] = (
+                (1.0 - self.lra_alpha) * old + self.lra_alpha * lam_hat
+            )
+
+        self.optimiser.zero_grad()
 
     def _update_weights_lra(self, residuals: dict):
         """
@@ -384,9 +476,12 @@ class Trainer:
 
             residuals = self.pinn.step()
 
-            if self.balancing == "lra":
+            if self.balancing in ("lra", "ntk"):
                 if not self._weights_initialized or step % self.gradnorm_every == 0:
-                    self._update_weights_lra(residuals)
+                    if self.balancing == "lra":
+                        self._update_weights_lra(residuals)
+                    else:
+                        self._update_weights_ntk(residuals)
                     self._weights_initialized = True
                     residuals = self.pinn.step()
 

@@ -66,6 +66,35 @@ def build_bounds():
     return bounds
 
 
+def decompose(u, ref):
+    """
+    Split the error into a scale part and a shape part.
+
+    Writing u = alpha*ref + r with r orthogonal to ref, the relative L2 obeys
+
+        L2^2 = (alpha - 1)^2 + shape^2,     shape = ||r|| / ||ref||
+
+    exactly. alpha is the least-squares multiple of the exact solution present
+    in the prediction and carries its sign; shape is what is left once the best
+    scalar multiple has been removed.
+
+    The reason for the split: a ratio of magnitudes cannot see a sign. Across a
+    Dirichlet eigenvalue the exact solution changes sign, and a network smooth
+    in the parameter cannot follow it, so it keeps one sign over the whole sweep
+    and is simply wrong on the far side. That failure leaves rms(u)/rms(ref)
+    looking healthy at 0.5 while alpha is negative.
+
+    Returns:
+        (alpha, shape)
+    """
+    denom = ref.pow(2).sum()
+    if denom <= 0:
+        return float("nan"), float("nan")
+    alpha = float((u * ref).sum() / denom)
+    shape = float((u - alpha * ref).norm() / ref.norm())
+    return alpha, shape
+
+
 def pde_residual(pinn, coords, mu, chunk):
     """
     Residual of the equation on a grid, in chunks.
@@ -235,9 +264,10 @@ def history(args, device, bounds, samp, physics):
     ref_rms = [q.pow(2).mean().sqrt() for q in refs]
 
     print(f"{len(series)} checkpoints, steps {series[0][0]}..{series[-1][0]}")
-    print("amplitude ratio (rms PINN / rms exact), then relative L2\n")
+    print("projection alpha (signed: 1 right, <1 damped, <0 inverted), "
+          "then shape error, then relative L2\n")
     head = "".join(f"{'k=' + f'{k:g}':>10}" for k in args.k)
-    print(f"{'step':>7}{head}   |{head}")
+    print(f"{'step':>7}{head}   |{head}   |{head}")
 
     for step, path in series:
         net  = Net.from_checkpoint(str(path), device=device)
@@ -246,11 +276,13 @@ def history(args, device, bounds, samp, physics):
                     paired_coords=True, device=device)
         with torch.no_grad():
             pred = pinn.predict(coords, mu)["u"].cpu()
-        amp = [f"{pred[:, j].pow(2).mean().sqrt() / ref_rms[j]:10.3f}"
-               for j in range(len(args.k))]
-        l2  = [f"{relative_l2(pred[:, j], refs[j]):10.3f}"
-               for j in range(len(args.k))]
-        print(f"{step:>7}{''.join(amp)}   |{''.join(l2)}", flush=True)
+        parts = [decompose(pred[:, j], refs[j]) for j in range(len(args.k))]
+        al = [f"{a:+10.3f}" for a, _ in parts]
+        sh = [f"{c:10.3f}" for _, c in parts]
+        l2 = [f"{relative_l2(pred[:, j], refs[j]):10.3f}"
+              for j in range(len(args.k))]
+        row = "".join(al) + "   |" + "".join(sh) + "   |" + "".join(l2)
+        print(f"{step:>7}" + row, flush=True)
 
 
 def main():
@@ -359,9 +391,15 @@ def main():
         # so any multiple of the solution satisfies it — and pays only at the
         # boundary. Relative L2 mixes that failure together with getting the
         # shape wrong; this separates it out.
+        alpha, shape = decompose(u, ref)
         print(f"  amplitude ratio      "
               f"{u.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt():.4f}"
-              f"   (1.0 = right size, < 1 = damped)")
+              f"   (magnitudes only, blind to sign)")
+        print(f"  projection alpha     {alpha:+.4f}"
+              f"   (1 = right, 0..1 = damped, negative = inverted)")
+        print(f"  shape error          {shape:.4f}"
+              f"   (what is left after the best scalar multiple; "
+              f"L2^2 = (alpha-1)^2 + shape^2)")
         print(f"  max abs error        {max_abs_error(u, ref):.4f}"
               f"   (reference amplitude {ref.abs().max():.3f})")
         print(f"  PDE residual RMS     {res[:, j].pow(2).mean().sqrt():.4e}")
