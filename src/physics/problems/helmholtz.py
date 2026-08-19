@@ -27,6 +27,29 @@ class helmholtz2D_annulus(Physics):
         # asking for them is cheaper and cannot be wrong by inference.
         self.r_in, self.r_out, self.n_arcs = r_in, r_out, n_arcs
 
+    # Largest solution the sweep is allowed to draw, for a boundary datum of
+    # size one. Above this the problem is not hard but pointless: the boundary
+    # condition asks for +-1 while the solution is hundreds of times that, no
+    # network of this size represents it, and its residual and data terms
+    # dominate every other setting in the batch. Measured on this annulus, a
+    # single drawn setting at k = 6.516 has max|u| = 986 against 1.0 at k = 1.
+    #
+    # 50 is chosen against what the network reaches rather than against the
+    # equation: runs here top out around an amplitude of 10, so 50 leaves room
+    # to be wrong about that by a factor of five while still excluding the
+    # settings that are only ever noise.
+    AMPLIFICATION_MAX = 50.0
+
+    def parameter_valid(self, params):
+        from validation.references import helmholtz_annulus_amplification
+
+        i = self.param_order.index("k")
+        ks = params.detach().cpu().numpy()[:, i]
+        amp = [helmholtz_annulus_amplification(float(k), self.r_in, self.r_out,
+                                               self.n_arcs) for k in ks]
+        return torch.tensor([a < self.AMPLIFICATION_MAX for a in amp],
+                            dtype=torch.bool)
+
     def reference(self, coords, params) -> dict:
         """
         Exact solution of this annulus problem, from the Bessel cross-product

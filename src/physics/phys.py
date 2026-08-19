@@ -52,6 +52,29 @@ class Physics(ABC):
             f"a file instead, or implement reference() and set has_reference"
         )
 
+    def parameter_valid(self, params) -> "torch.Tensor":
+        """
+        Which of these parameter settings pose a well-defined problem.
+
+        Default: all of them. Override where some values of the sweep do not
+        correspond to a problem worth training on — for the annulus, a
+        Dirichlet eigenvalue, where the boundary value problem has no unique
+        solution and the solution near it is amplified by orders of magnitude
+        above its own boundary data.
+
+        Used by draw_parameters to redraw rather than to refuse: a sweep should
+        not stop because one of thirty-two draws was unlucky, and it should not
+        train on that draw either. Rejecting here rather than in the data term
+        keeps every part of the objective looking at the same settings.
+
+        Args:
+            params: (M, mu_dim)
+
+        Returns:
+            bool tensor of shape (M,)
+        """
+        return torch.ones(params.shape[0], dtype=torch.bool)
+
     def make_param_batch(self, par: list) -> ParamBatch:
         return ParamBatch.from_dict(
             {key: [m[key] for m in par] for key in self.param_order},
@@ -241,7 +264,61 @@ class Physics(ABC):
             for key in self.param_order:
                 if key not in self.limits:
                     p[key] = self.par[key][0].item()
+
+        if anchor_ends:
+            new_params = self._redraw_invalid(new_params, n_axes)
         return new_params
+
+    # How many times to redraw before giving up. The rejected set is normally a
+    # sliver of the range — for the annulus swept over [1, 20], two windows of
+    # a few thousandths each — so a handful of attempts is generous. A limit
+    # that is hit at all means the sweep is mostly invalid, which is a
+    # configuration to fix rather than a draw to repeat.
+    MAX_REDRAWS = 20
+
+    def _redraw_invalid(self, params: list[dict], n_axes: int) -> list[dict]:
+        """
+        Replace settings the physics rejects by fresh draws.
+
+        The pinned endpoints are exempt from redrawing and checked separately:
+        an invalid endpoint is a badly chosen sweep, not bad luck, and silently
+        moving it would hide that.
+        """
+        import torch as _t
+
+        def as_tensor(rows):
+            return _t.tensor([[r[k] for k in self.param_order] for r in rows],
+                             dtype=_t.float32)
+
+        ok = self.parameter_valid(as_tensor(params))
+        if bool(ok.all()):
+            return params
+
+        pinned = set(range(2 * n_axes)) if len(params) >= 2 * n_axes else set()
+        bad_pinned = [i for i in range(len(params)) if not ok[i] and i in pinned]
+        if bad_pinned:
+            vals = [params[i] for i in bad_pinned]
+            raise ValueError(
+                f"the sweep's own endpoints are not valid parameter settings: "
+                f"{vals}. These are the limits themselves, so this is the range "
+                f"to fix, not a draw to repeat."
+            )
+
+        for _ in range(self.MAX_REDRAWS):
+            idx = [i for i in range(len(params)) if not ok[i] and i not in pinned]
+            if not idx:
+                break
+            fresh = self.draw_parameters(n=len(idx), anchor_ends=False)
+            for slot, repl in zip(idx, fresh):
+                params[slot] = repl
+            ok = self.parameter_valid(as_tensor(params))
+        else:
+            raise ValueError(
+                f"could not draw {len(params)} valid parameter settings in "
+                f"{self.MAX_REDRAWS} attempts; most of the declared sweep is "
+                f"invalid for this problem"
+            )
+        return params
 
     def _resample_parameters(self) -> None:
         """

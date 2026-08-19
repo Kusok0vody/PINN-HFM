@@ -230,6 +230,57 @@ def advection_diffusion_periodic(
     return u
 
 
+def helmholtz_annulus_amplification(k, r_in, r_out, n_arcs=8, n_terms=16,
+                                    n_radii=24):
+    """
+    How large the exact solution gets, for a boundary datum of size one.
+
+    An upper bound on max|u|, from the same series as helmholtz_annulus but
+    without its angular part: each mode contributes at most its radial profile
+    times its Fourier coefficient, so
+
+        A(k) = (4/pi) sum_j max_rho |C_n(rho)| / (j |C_n(r_out)|),   n = m j
+
+    which is what the series would give if every mode peaked together. Cheap —
+    a few dozen Bessel evaluations, no angular grid — so a sweep can test every
+    drawn parameter before training on it.
+
+    This replaces an earlier attempt that measured the modal determinant
+    relative to the terms forming it. That number is not the amplification and
+    reads almost perfectly innocent where the solution is already enormous: at
+    k = 6.4 on the 1:3 annulus it gave 0.98 out of 1 while max|u| was 29.6, and
+    it admitted k = 6.516 at 0.027 where max|u| is 986. The denominator of the
+    series is the determinant itself, not its ratio to anything.
+
+    Returns inf where the series cannot be formed at all, which is the same
+    condition helmholtz_annulus raises on.
+    """
+    jv, yv = _bessel()
+    if k <= 0.0:
+        return float("inf")
+
+    kappa = math.sqrt(k)
+    m     = n_arcs // 2
+    z_in, z_out = kappa * r_in, kappa * r_out
+    z_rho = kappa * np.linspace(r_in, r_out, n_radii)
+
+    total = 0.0
+    for j in range(1, 2 * n_terms, 2):
+        n = m * j
+        j_in,  y_in  = jv(n, z_in),  yv(n, z_in)
+        j_out, y_out = jv(n, z_out), yv(n, z_out)
+        if not all(np.isfinite(v) for v in (j_in, y_in, j_out, y_out)):
+            break
+        denom = y_in * j_out - j_in * y_out
+        if denom == 0.0:
+            return float("inf")
+        c_rho = y_in * jv(n, z_rho) - j_in * yv(n, z_rho)
+        if not np.all(np.isfinite(c_rho)):
+            break
+        total += (4.0 / math.pi) * np.max(np.abs(c_rho)) / (abs(denom) * j)
+    return float(total)
+
+
 def helmholtz_annulus_resonances(k_min, k_max, r_in, r_out, n_arcs=8,
                                  n_modes=32, n_scan=20000):
     """

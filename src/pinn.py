@@ -46,6 +46,7 @@ class PINN(nn.Module):
         self._data_source   = None
         self._data_follows  = False
         self._data_resample = False
+        self._data_relative = True
         self.use_data       = True
 
         self.net.to(self.device)
@@ -328,8 +329,53 @@ class PINN(nn.Module):
         torch.random.set_rng_state(g)
         return coords
 
+    def _evaluate_source(self, source, coords, params):
+        """
+        Ask the source for values, dropping settings it refuses.
+
+        A reference can legitimately have no answer at some parameter values —
+        for the annulus, at a Dirichlet eigenvalue the boundary value problem
+        has no unique solution, and the series raises rather than return a
+        number nobody should trust. That refusal is correct and must not be
+        softened at the source. It must also not end a run: the sweep draws
+        fresh settings every thousand steps, and one unlucky draw out of
+        thirty-two killed a run at step 14000 after forty minutes.
+
+        The whole batch is tried first, since that is the normal case and one
+        call is cheaper than M. Only if it refuses are the settings tried one at
+        a time, and the survivors kept.
+
+        Returns:
+            (params_kept, values) — params_kept may be shorter than params
+        """
+        try:
+            return params, source(coords, params)
+        except ValueError:
+            pass
+
+        kept, cols, dropped = [], [], []
+        for i in range(params.shape[0]):
+            row = params[i:i + 1]
+            try:
+                cols.append(source(coords, row))
+                kept.append(i)
+            except ValueError:
+                dropped.append([round(float(v), 4) for v in row.flatten()])
+
+        if not kept:
+            raise ValueError(
+                f"the data source refused every one of {params.shape[0]} "
+                f"parameter settings"
+            )
+        print(f"PINN: data source refused {len(dropped)} of {params.shape[0]} "
+              f"settings {dropped}; keeping {len(kept)}")
+        names = cols[0].keys()
+        values = {n: torch.cat([c[n] for c in cols], dim=1) for n in names}
+        return params[kept], values
+
     def set_data(self, source, n_points: int = 256, coords=None, params=None,
-                 seed: int = 0, resample_points: bool = False):
+                 seed: int = 0, resample_points: bool = False,
+                 relative: bool = True):
         """
         Install reference or measured values as an extra loss term.
 
@@ -391,6 +437,20 @@ class PINN(nn.Module):
                       recomputed at every new parameter batch — so what could be
                       memorised is already a function of mu at those points
                       rather than a table.
+            relative: divide each setting's residual by the RMS of its own
+                      values, so every setting contributes on equal terms.
+
+                      On by default, and for the same reason the equation's
+                      residual is made dimensionless: across a family the scale
+                      of the solution is not constant. Measured here, a sweep of
+                      [1, 20] drew a setting whose exact solution reaches 978
+                      while another reaches 1.0, and an absolute data term would
+                      have weighted them by the square of that — a factor of a
+                      quarter of a million, from one draw out of thirty-two.
+
+                      Turn it off for genuine measurements of comparable
+                      magnitude, where the natural unit is the measurement and a
+                      relative error would amplify whatever is smallest.
         """
         if source is None:
             if not self.physics.has_reference:
@@ -429,7 +489,7 @@ class PINN(nn.Module):
             if coords is None:
                 coords = self._draw_data_points(n_points, seed)
             params  = self.physics.par.tensor.detach().cpu()
-            values  = source(coords, params)
+            params, values = self._evaluate_source(source, coords, params)
             follows = True
         else:
             if coords is None or params is None:
@@ -441,6 +501,7 @@ class PINN(nn.Module):
 
         self._data_source  = source
         self._data_follows = follows
+        self._data_relative = relative
         self._data_resample = resample_points and follows
         if resample_points and not follows:
             print("PINN: resample_points has no effect on data read from a file; "
@@ -450,7 +511,8 @@ class PINN(nn.Module):
 
         n, m = self.data["coords"].shape[0], self.data["params"].shape[0]
         where = "redrawn each resample" if self._data_resample else "fixed"
-        print(f"PINN: {n} data points ({where}), {m} parameter settings"
+        how   = "relative" if relative else "absolute"
+        print(f"PINN: {n} data points ({where}, {how}), {m} parameter settings"
               f"{' following the sweep' if follows else ' fixed'}, "
               f"variables {sorted(self.data['values'])}")
 
@@ -487,6 +549,13 @@ class PINN(nn.Module):
             )
         self.data["params"] = params.to(self.device)
         self.data["values"] = checked
+        # Per setting, from the targets rather than from the prediction: the
+        # values are known and fixed, so this is a constant unit and not a
+        # quantity the optimiser can move.
+        self.data["scale"] = {
+            name: v.pow(2).mean(dim=0, keepdim=True).sqrt().clamp_min(self.SCALE_FLOOR)
+            for name, v in checked.items()
+        }
 
     def update_data(self):
         """
@@ -510,7 +579,9 @@ class PINN(nn.Module):
             n = self.data["coords"].shape[0]
             self.data["coords"] = self._draw_data_points(n).to(self.device)
         params = self.physics.par.tensor.detach().cpu()
-        values = self._data_source(self.data["coords"].cpu(), params)
+        params, values = self._evaluate_source(
+            self._data_source, self.data["coords"].cpu(), params
+        )
         self._install_values(params, values)
 
     def step(self) -> dict:
@@ -566,6 +637,9 @@ class PINN(nn.Module):
             pred_data = self.predict(self.data["coords"], self.data["params"])
             res_data = {name: pred_data[name] - target
                         for name, target in self.data["values"].items()}
+            if self._data_relative:
+                res_data = {name: v / self.data["scale"][name]
+                            for name, v in res_data.items()}
 
         return {
             "pde":   res_pde,
