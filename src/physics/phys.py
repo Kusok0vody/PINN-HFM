@@ -24,6 +24,34 @@ class Physics(ABC):
         self.limits        = {}
         self.output_ansatz = {}
         
+    # Whether reference() below is implemented. A flag rather than a call that
+    # might raise: a driver deciding how to build the data term for several
+    # problems at once should be able to ask without provoking anything, and a
+    # problem with no closed form is the normal case, not an error.
+    has_reference = False
+
+    def reference(self, coords, params) -> dict:
+        """
+        Exact solution at the given points and parameter settings.
+
+        Implemented only where a closed form exists; subclasses that have one
+        override this and set has_reference = True. Everything else keeps the
+        default and gets its data from a file instead.
+
+        Args:
+            coords: (N, n_coords) in Geometry order
+            params: (M, mu_dim)
+
+        Returns:
+            {name: (N, M)} for the outputs this physics defines. Names outside
+            self.transforms are rejected downstream, so a partial reference —
+            one variable of several — is allowed and useful.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no closed-form solution; set data from "
+            f"a file instead, or implement reference() and set has_reference"
+        )
+
     def make_param_batch(self, par: list) -> ParamBatch:
         return ParamBatch.from_dict(
             {key: [m[key] for m in par] for key in self.param_order},

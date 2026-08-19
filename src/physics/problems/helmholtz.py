@@ -16,8 +16,37 @@ class helmholtz2D_annulus(Physics):
         k: reaction / wave parameter
     """
 
-    def __init__(self, device="cpu", dim=2, has_time=False):
+    has_reference = True
+
+    def __init__(self, device="cpu", dim=2, has_time=False,
+                 r_in: float = 1.0, r_out: float = 3.0, n_arcs: int = 8):
         super().__init__(device, dim, has_time)
+        # Geometry of the annulus the closed form belongs to. The boundaries
+        # dict passed to setParameters describes the same thing, but as arc
+        # parameterisations that would have to be reverse-engineered into radii;
+        # asking for them is cheaper and cannot be wrong by inference.
+        self.r_in, self.r_out, self.n_arcs = r_in, r_out, n_arcs
+
+    def reference(self, coords, params) -> dict:
+        """
+        Exact solution of this annulus problem, from the Bessel cross-product
+        series in validation.references.
+
+        Raises for k at or near a Dirichlet eigenvalue, where the boundary value
+        problem has no unique solution and there is nothing to be exact about.
+        Points outside the annulus come back NaN from the series and are
+        rejected by whoever installs the data, which is the intended behaviour:
+        a silent extrapolation would be worse than a refusal.
+        """
+        import numpy as np
+        from validation.references import helmholtz_annulus
+
+        c = coords.detach().cpu().numpy()
+        y, x = c[:, 0], c[:, 1]          # Geometry order for (has_time=False, dim=2)
+        ks = params.detach().cpu().numpy()[:, self.param_order.index("k")]
+        cols = [helmholtz_annulus(x, y, float(k), self.r_in, self.r_out,
+                                  self.n_arcs) for k in ks]
+        return {"u": torch.tensor(np.stack(cols, axis=1), dtype=torch.float32)}
 
     def setParameters(
         self,

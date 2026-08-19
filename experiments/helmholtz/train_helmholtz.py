@@ -12,6 +12,7 @@ from network.activations          import ActivationFactory, Sine
 from physics.problems.helmholtz import helmholtz2D_annulus
 from training.trainer             import Trainer
 from pinn                         import PINN
+from validation.references        import helmholtz_annulus_resonances
 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -22,9 +23,10 @@ print(f"Device: {device}")
 R = 3.0
 r = 1.0
 
-N_r   = 128
-N_R   = 64
-N_PDE = 4096
+N_r    = 128
+N_R    = 64
+N_PDE  = 4096
+N_DATA = 256
 
 bounds = {}
 
@@ -78,23 +80,30 @@ net = Net(
     use_film=True,
     film_layers=1,
     use_fourier=False,
-    output_scaling=True,
 )
 
 K_MIN = 1.0
-K_MAX = 10.0
-N_K   = 10
+K_MAX = 20.0
+N_K   = 32
 
 ks = torch.linspace(K_MIN, K_MAX, N_K)
 parameters = [{"k": k.item()} for k in ks]
-# parameters = [{"k": 10}]
 limits = {"k": {"min": K_MIN, "max": K_MAX, "N": N_K, "scale": "linear"}}
+
+poles = helmholtz_annulus_resonances(K_MIN, K_MAX, r, R, 8)
+if poles:
+    raise SystemExit(
+        f"sweep [{K_MIN}, {K_MAX}] contains Dirichlet eigenvalues "
+        f"{[round(v, 3) for v in poles]}; pick a range between them"
+    )
+print(f"sweep k in [{K_MIN}, {K_MAX}], {N_K} settings, no eigenvalues inside")
 
 physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
 physics.setParameters(
     params=parameters,
     boundaries=bounds,
     initial=None,
+    limits=limits
 )
 
 pinn = PINN(
@@ -103,21 +112,24 @@ pinn = PINN(
     adaptive_pde=True,
     adaptive_bc=False,
     adaptive_ic=False,
-    paired_coords=True,
     scale_free_pde=True,
     device=device,
 )
 
-N_ITERS = 30000
+pinn.set_data(None, n_points=N_DATA, seed=42)
+
+N_ITERS = 20000
 
 trainer = Trainer(
     pinn=pinn,
     lr=1e-3,
     n_iter=N_ITERS,
     resample_every=1000,
+    param_every=1000,
     checkpoint_every=100,
     gradnorm_every=200,
     lra_alpha=0.01,
+    use_data=True,
     checkpoint_path="checkpoints",
     run_name="helmholtz",
     save_final=True,

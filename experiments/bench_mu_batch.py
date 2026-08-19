@@ -16,10 +16,15 @@ only reason not to was cost.
 
 Arms, per problem:
 
-    loop   M=4      what the experiments do today
-    paired M=4      same coverage, cheaper path
-    paired M=16     four times the coverage
-    paired M=32     eight times
+    M=4      what the experiments do today
+    M=16     four times the coverage
+    M=32     eight times
+
+The loop-versus-paired arms this script started with are gone: the two paths
+agreed bitwise on the residual and to 1e-6 on the weight gradients, the paired
+one was faster and fitted where the other did not, and the choice was removed
+from the code. What is left is the question that choice was made to answer —
+whether covering more of the parameter space per step costs anything.
 
 Quality is reported two ways. Helmholtz has an analytic solution at any k, so it
 gets a relative L2 averaged over a grid of k. Proppant has no reference, so it
@@ -204,10 +209,10 @@ def run_arm(args, device, samp, make_net, make_physics, quality, path, m):
     ph   = make_physics(m)
     torch.manual_seed(args.seed + 1000)
     pinn = PINN(net, ph, samp, n_refine=1, adaptive_pde=True,
-                paired_coords=(path == "paired"), device=device)
+                device=device)
     tr = Trainer(pinn=pinn, lr=1e-3, n_iter=args.steps,
                  resample_every=args.resample_every, checkpoint_every=10**9,
-                 gradnorm_every=200, lra_alpha=0.01, balancing="lra",
+                 gradnorm_every=200, lra_alpha=0.01,
                  param_every=args.param_every, checkpoint_path="/tmp/bench_mu",
                  run_name="mu", save_final=False, logger="none", device=device,
                  progress=False, log_every=max(1, args.steps // 4))
@@ -238,7 +243,7 @@ def main():
     ap.add_argument("--k-max", type=float, default=6.0,
                     help="helmholtz sweep, upper end; the default stops below the "
                          "first resonance of the 1:3 annulus at k = 6.513")
-    ap.add_argument("--arms", default="loop:4,paired:4,paired:16,paired:32")
+    ap.add_argument("--arms", default="M:4,M:16,M:32")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -285,7 +290,7 @@ def main():
 
     log("=== summary ===")
     log(f"  {'arm':>14s} | {'ms/step':>9s} {'peak MB':>9s} | quality")
-    ref = results.get(("paired", 4)) or results.get(("loop", 4))
+    ref = results.get(("M", 4))
     for (path, m), r in results.items():
         if "error" in r:
             log(f"  {path+' M='+str(m):>14s} | {r['error']:>19s} |")

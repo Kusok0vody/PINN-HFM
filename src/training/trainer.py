@@ -36,6 +36,7 @@ class Trainer:
         weight_max:       clamp on the balancing weights; the LRA ratio is
                           unbounded and diverges without it
         param_every:      resample physics parameters every K iterations (0 = never)
+        use_data:         include the data term when data are installed
         validator:        Validator instance, or None to skip validation
         validate_every:   run the validator every K iterations (0 = never)
         optimiser:        "nadam" or "hypergrad" (adapts its own learning rate)
@@ -63,9 +64,9 @@ class Trainer:
         gradnorm_every:   int   = 200,
         lra_alpha:        float = 0.01,
         param_every:      int   = 0,
+        use_data:         bool  = True,
         validator               = None,
         validate_every:   int   = 0,
-        balancing:        str   = "lra",
         weight_max:       float = 100.0,
         weight_min:       float = 0.01,
         optimiser:        str   = "nadam",
@@ -90,12 +91,6 @@ class Trainer:
         self.log_every        = log_every
         self.start_step       = start_step
 
-        if balancing not in ("lra", "ntk", "none"):
-            raise ValueError(
-                f"unknown balancing scheme '{balancing}'; choose 'lra', 'ntk' "
-                f"or 'none'"
-            )
-        self.balancing        = balancing
         self.gradnorm_every   = gradnorm_every
         self.lra_alpha        = lra_alpha
         self.weight_max       = weight_max
@@ -103,7 +98,20 @@ class Trainer:
 
         self.adaptive_weights = {}
         self._weights_initialized = False
+        self._weights_saturated = False
         self.param_every = param_every
+
+        # Data are installed on the PINN and switched on here, so that an
+        # ablation is one flag in the training script rather than an edit to
+        # where the data are built.
+        pinn.use_data = use_data
+        if use_data and pinn.data is None:
+            print("Trainer: use_data is on but no data are installed; call "
+                  "pinn.set_data(...) or the term is simply absent.")
+        elif not use_data and pinn.data is not None:
+            n = pinn.data["coords"].shape[0]
+            print(f"Trainer: {n} data points are installed but use_data is off, "
+                  f"so they take no part in training.")
 
         # Parameter sweeping needs two things that are set in different places:
         # limits on the Physics and a non-zero period here. Either one alone is
@@ -203,85 +211,56 @@ class Trainer:
             for name, res in res_dict.items()
         }
 
-    # Probes for the Hutchinson trace estimate, one backward pass each per term
-    # per rebalance. Measured against an exact trace (one backward per residual
-    # entry) on the Helmholtz annulus, the spread between repeats is 57 percent
-    # at one probe, 70 at four, 30 at sixteen and 8 at sixty-four; the estimator
-    # is unbiased, so this is variance rather than error. Sixteen sits where the
-    # remaining noise is well inside what lra_alpha smooths away over the
-    # hundreds of rebalances in a run, without paying four times over for it.
-    NTK_PROBES = 16
+    # Warn when the lightest and heaviest term differ by this factor. Chosen
+    # from measurement, not taste. On the annulus with sixteen boundary arcs as
+    # separate terms, 200 steps of LRA spanned 2.9x and the same 200 steps of
+    # NTK weighting spanned 495x, on its way to the 1e4 the clamps allow; a
+    # longer LRA run on the same problem spanned about 30x. The threshold sits
+    # an order above healthy and well below the clamp, so it fires while the
+    # objective still has time to be fixed rather than after the lightest terms
+    # have stopped constraining anything.
+    WEIGHT_SPREAD_WARN = 300.0
 
-    def _trace_ntk(self, residual: torch.Tensor, params: list) -> float:
+    def _check_weights(self, step: int):
         """
-        tr(K) for one loss term, where K is its neural tangent kernel,
-        K[a, b] = grad_w r_a . grad_w r_b over the term's residual entries.
+        Say something when the balancing weights pile up against the clamp.
 
-        The trace is the sum over entries of ||grad_w r_a||^2, so computing it
-        exactly needs one backward pass per collocation point. It is estimated
-        instead from
+        Every rule of the form lambda_i = mean_j(stat_j) / stat_i is a positive
+        feedback loop for any term whose statistic collapses: satisfy a
+        condition, its statistic shrinks, its weight grows, it is enforced
+        harder still. The clamp stops the number but not the consequence — with
+        most of the budget on a handful of terms the rest of the objective stops
+        constraining anything.
 
-            tr(K) = tr(J J^T) = E_v || J^T v ||^2,   v of independent +-1,
+        Measured here on the annulus with sixteen boundary arcs as separate
+        terms: under NTK weighting the eight homogeneous inner-arc terms reached
+        the clamp within a few dozen updates, the equation term was left with a
+        negligible weight, and a smooth spurious field of rms 1.7 grew over the
+        following fifteen thousand steps while the projection onto the exact
+        solution stayed near one. Nothing in the loss curve says that is
+        happening.
 
-        which is Hutchinson's identity: E[v v^T] = I, so E[v^T J J^T v] is the
-        trace. Each probe is a single backward pass on the scalar v . r.
-
-        Why this is not the same statistic as LRA's. LRA takes the norm of
-        grad_w of the aggregated loss, that is J^T weighted by the residual and
-        summed before the norm; entries whose gradients point in opposite
-        directions cancel there, and a term every one of whose points is
-        pulling hard can still report a small number. The trace squares before
-        summing and cannot cancel. On a solution that changes sign across the
-        domain — this Helmholtz has eight alternating lobes — the two are not
-        interchangeable.
+        The published rules are formulated for two to four loss terms. Splitting
+        a boundary into arcs multiplies the count, and the mean in the numerator
+        is then set by whichever terms happen to be large.
         """
-        flat  = residual.reshape(-1)
-        total = 0.0
-        for _ in range(self.NTK_PROBES):
-            v = torch.randint(0, 2, flat.shape, device=flat.device,
-                              dtype=flat.dtype) * 2.0 - 1.0
-            total += self._flat_grad(flat.dot(v), params).pow(2).sum().item()
-        return total / self.NTK_PROBES
-
-    def _update_weights_ntk(self, residuals: dict):
-        """
-        Balancing by the traces of the per-term NTK blocks.
-
-        Training dynamics under gradient descent are e' = -K e, so the
-        eigenvalues of K are the rates at which the error components decay and
-        tr(K_i) measures how much motion term i is capable of at all. Equalising
-        the traces equalises those rates, which is what Wang, Yu and Perdikaris
-        propose:
-
-            lambda_i = tr(K_total) / tr(K_i)
-
-        The form used here is mean_j tr(K_j) / tr(K_i), which differs by the
-        constant factor of the number of terms. That scales every weight
-        identically, so it rescales the total loss and nothing else — under Adam
-        that is invisible — and it keeps the numbers on the same footing as the
-        LRA branch, so the clamps and lra_alpha mean the same thing in both.
-        """
-        params = [p for p in self.pinn.net.parameters() if p.requires_grad]
-        flat_res = {f"{group}/{name}": res
-                    for group, res_dict in residuals.items()
-                    for name, res in res_dict.items()}
-        if not flat_res:
+        if len(self.adaptive_weights) < 2 or self._weights_saturated:
+            return
+        items = sorted(self.adaptive_weights.items(), key=lambda kv: kv[1])
+        lo_k, lo = items[0]
+        hi_k, hi = items[-1]
+        if lo <= 0.0 or hi / lo < self.WEIGHT_SPREAD_WARN:
             return
 
-        traces = {key: self._trace_ntk(res, params) for key, res in flat_res.items()}
-        mean_trace = sum(traces.values()) / len(traces)
-
-        for key, tr in traces.items():
-            if tr < 1e-12:
-                continue
-            lam_hat = min(max(mean_trace / (tr + 1e-8), self.weight_min),
-                          self.weight_max)
-            old = self.adaptive_weights.get(key, 1.0)
-            self.adaptive_weights[key] = (
-                (1.0 - self.lra_alpha) * old + self.lra_alpha * lam_hat
-            )
-
-        self.optimiser.zero_grad()
+        self._weights_saturated = True
+        vals = [v for _, v in items]
+        print("")
+        print(f"Trainer: at step {step} the balancing weights span "
+              f"{hi / lo:.3g}x — lowest {lo_k}={lo:.3g}, highest {hi_k}={hi:.3g}, "
+              f"median {vals[len(vals) // 2]:.3g} over {len(vals)} terms. The "
+              f"lowest-weighted terms are no longer constraining the solution. "
+              f"For reference a healthy run on this problem spanned about 30x.",
+              flush=True)
 
     def _update_weights_lra(self, residuals: dict):
         """
@@ -327,11 +306,8 @@ class Trainer:
                 (1.0 - self.lra_alpha) * old + self.lra_alpha * lam_hat
             )
 
+        self._check_weights(getattr(self, "_step", 0))
         self.optimiser.zero_grad()
-
-    def _update_weights(self, residuals: dict):
-        if self.balancing == "lra":
-            self._update_weights_lra(residuals)
 
     def _aggregate_loss(self, residuals: dict) -> tuple[torch.Tensor, dict]:
         loss_terms = {}
@@ -411,6 +387,12 @@ class Trainer:
                 "net":        self.pinn.net.state_dict(),
                 "net_config": self.pinn.net.serialize_config(),
                 "optimiser":  self.optimiser.state_dict(),
+                # The balancing weights are state too, and they are the first
+                # suspect whenever a run diverges: a term whose statistic
+                # collapses takes its weight to the clamp and drags the whole
+                # objective with it. Without them in the checkpoint that has to
+                # be reconstructed by guesswork after the fact.
+                "weights":    dict(self.adaptive_weights),
                 # scheduler="none" leaves nothing to save, and step 0 is always
                 # a checkpoint step, so without this the option crashes on its
                 # first use rather than at some later moment.
@@ -461,9 +443,13 @@ class Trainer:
                     desc="Training", disable=not self.progress)
 
         for step in pbar:
+            self._step = step
             
             if self.param_every > 0 and step % self.param_every == 0:
                 self.pinn.physics._resample_parameters()
+                # Values that follow the sweep are recomputed here,
+                # at the new settings and on the same points.
+                self.pinn.update_data()
                 # The objective just changed; an adapted step size carried
                 # across that boundary refers to the previous problem.
                 if hasattr(self.optimiser, "reset_lr"):
@@ -472,18 +458,15 @@ class Trainer:
             if step > self.start_step and step % self.resample_every == 0:
                 self.pinn.resample_adaptive()
 
+
             self.optimiser.zero_grad()
 
             residuals = self.pinn.step()
 
-            if self.balancing in ("lra", "ntk"):
-                if not self._weights_initialized or step % self.gradnorm_every == 0:
-                    if self.balancing == "lra":
-                        self._update_weights_lra(residuals)
-                    else:
-                        self._update_weights_ntk(residuals)
-                    self._weights_initialized = True
-                    residuals = self.pinn.step()
+            if not self._weights_initialized or step % self.gradnorm_every == 0:
+                self._update_weights_lra(residuals)
+                self._weights_initialized = True
+                residuals = self.pinn.step()
 
             total, loss_terms = self._aggregate_loss(residuals)
 

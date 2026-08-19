@@ -272,8 +272,7 @@ def history(args, device, bounds, samp, physics):
     for step, path in series:
         net  = Net.from_checkpoint(str(path), device=device)
         net.eval()
-        pinn = PINN(net, physics, samp, autoscale_inputs=False,
-                    paired_coords=True, device=device)
+        pinn = PINN(net, physics, samp, autoscale_inputs=False, device=device)
         with torch.no_grad():
             pred = pinn.predict(coords, mu)["u"].cpu()
         parts = [decompose(pred[:, j], refs[j]) for j in range(len(args.k))]
@@ -347,10 +346,7 @@ def main():
     # The checkpoint carries its own input rescaling; recomputing it here would
     # overwrite the map the weights were trained under whenever this script's
     # sampler or limits differ from the training script's by anything at all.
-    # Paired coordinates for the residual: one backward instead of one per
-    # setting, which is the difference between fitting on the card and not.
-    pinn = PINN(net, physics, samp, autoscale_inputs=False,
-                paired_coords=True, device=device)
+    pinn = PINN(net, physics, samp, autoscale_inputs=False, device=device)
 
     coords, rho, gx, gy = polar_grid(args.n_rho, args.n_theta, device)
     mu = torch.tensor([[k] for k in args.k], dtype=torch.float32, device=device)

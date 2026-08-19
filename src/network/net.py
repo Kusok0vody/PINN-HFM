@@ -112,7 +112,6 @@ class Net(nn.Module):
         n_freqs:            int   = 16,
         omega_min:          float = 1.0,
         omega_max:          float = 64.0,
-        output_scaling:     bool  = False,
     ):
         super().__init__()
 
@@ -137,7 +136,6 @@ class Net(nn.Module):
             "n_freqs":            n_freqs,
             "omega_min":          omega_min,
             "omega_max":          omega_max,
-            "output_scaling":     output_scaling,
         }
 
         self.use_film    = use_film
@@ -247,54 +245,7 @@ class Net(nn.Module):
                     num_layers=head_layers,
                     activation=act_out,
                 )
-        # Amplitude as an explicit degree of freedom, in the logarithm.
-        #
-        # Without this the scale of the solution lives in the last layer's
-        # weights, and reaching an amplitude of A means multiplying them by A.
-        # Adam moves each weight by about lr per step, so a solution of size 100
-        # costs on the order of 1e5 steps of pure growth before the shape can
-        # even start to matter — a cost that has nothing to do with the problem
-        # being hard and everything to do with how the scale is parameterised.
-        # Here the same factor is exp(g + W z_mu): reaching 100 takes 4.6 in an
-        # additive coordinate, and W makes it a function of the parameters, so
-        # settings whose solutions differ in magnitude by orders do not have to
-        # negotiate that difference through FiLM.
-        #
-        # g and W start at zero, so the gain is exactly 1 and the network begins
-        # life as the unscaled one. Not bit-for-bit, though: constructing the
-        # extra Linear consumes random numbers, so the other weights differ from
-        # a net built without the flag under the same seed.
-        self.output_scaling = output_scaling
-        if output_scaling:
-            self.log_gain = nn.ParameterDict(
-                {name: nn.Parameter(torch.zeros(1)) for name in outputs_config}
-            )
-            self.gain_mu = nn.ModuleDict(
-                {name: nn.Linear(dmu, 1) for name in outputs_config}
-            )
-            for lin in self.gain_mu.values():
-                nn.init.zeros_(lin.weight)
-                nn.init.zeros_(lin.bias)
-
         self._init_weights()
-
-    # exp() of an unbounded exponent is one bad step away from inf. The bound is
-    # applied smoothly so the gradient survives at the edge instead of vanishing
-    # the way a hard clamp's would; e^20 is far past any amplitude a residual
-    # can usefully describe. The price of smoothness is that tanh compresses
-    # everywhere, not only near the limit: an exponent of 4.6 acts as 4.52, so
-    # the coordinate is additive up to a few percent rather than exactly.
-    GAIN_LIMIT = 20.0
-
-    def _apply_gain(self, out: dict, z_mu: torch.Tensor) -> dict:
-        if not self.output_scaling:
-            return out
-        scaled = {}
-        for name, val in out.items():
-            e = self.log_gain[name] + self.gain_mu[name](z_mu).squeeze(-1)   # (M,)
-            e = self.GAIN_LIMIT * torch.tanh(e / self.GAIN_LIMIT)
-            scaled[name] = val * torch.exp(e).unsqueeze(0)                   # (N, M)
-        return scaled
 
     def _init_weights(self):
         """Initialises all MLP blocks with activation-aware weight initialisation."""
@@ -413,10 +364,7 @@ class Net(nn.Module):
             beta        = beta.unsqueeze(0)
             H           = gamma * H + beta
 
-        return self._apply_gain(
-            {name: module(H).squeeze(-1) for name, module in self.outputs.items()},
-            z_mu,
-        )
+        return {name: module(H).squeeze(-1) for name, module in self.outputs.items()}
 
     def forward_paired(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
         """
@@ -455,10 +403,7 @@ class Net(nn.Module):
             gamma, beta = self.film(z_mu).chunk(2, dim=-1)
             H = gamma.unsqueeze(0) * H + beta.unsqueeze(0)
 
-        return self._apply_gain(
-            {name: module(H).squeeze(-1) for name, module in self.outputs.items()},
-            z_mu,
-        )
+        return {name: module(H).squeeze(-1) for name, module in self.outputs.items()}
 
     def __repr__(self) -> str:
         lines = ["Net("]
@@ -515,7 +460,12 @@ class Net(nn.Module):
         # constant the network used before the field existed, so an old
         # checkpoint reconstructs the architecture it was actually trained with.
         cfg.setdefault("film_layers", 2)
-        cfg.setdefault("output_scaling", False)
+        # Dropped after measurement: a multiplicative output gain never paid
+        # for itself at these amplitudes, and it made u = 0 a fixed point of
+        # every gradient, which is how one run reached exactly zero and stayed.
+        # Old checkpoints still carry the key, so it is discarded rather than
+        # passed to a constructor that no longer takes it.
+        cfg.pop("output_scaling", None)
 
         return cfg
 
@@ -532,6 +482,8 @@ class Net(nn.Module):
         on this Net is therefore reset rather than left in place — silently
         keeping it would feed the old weights inputs they never saw.
         """
+        state = {k: v for k, v in state.items()
+                 if not k.startswith(("log_gain.", "gain_mu."))}
         missing, unexpected = net.load_state_dict(state, strict=False)
 
         absent = set(missing) - set(Net.RESCALE_BUFFERS)

@@ -189,7 +189,7 @@ PDE_TYPE = {
 
 BASE = dict(dx=32, dmu=32, d_h=64, encoder_layers=2, trunk_layers=3,
             head_layers=2, film_layers=1, use_film=True,
-            optimiser="nadam", balancing="lra", param_every=100, lr=1e-3,
+            optimiser="nadam", param_every=100, lr=1e-3,
             scheduler="plateau", sched_patience=2000)
 
 SWEEPS = {
@@ -214,7 +214,6 @@ SWEEPS = {
                   ("nadam lr=1e-4",   {"optimiser": "nadam", "lr": 1e-4}),
                   ("hypergrad",       {"optimiser": "hypergrad"}),
                   ("hypergrad lr0=1e-5", {"optimiser": "hypergrad", "lr": 1e-5})],
-    "balancing": [("lra", {"balancing": "lra"}), ("none", {"balancing": "none"})],
     "scheduler": [("plateau p=2000", {"scheduler": "plateau", "sched_patience": 2000}),
                   ("plateau p=1000", {"scheduler": "plateau", "sched_patience": 1000}),
                   ("cosine",         {"scheduler": "cosine"}),
@@ -262,14 +261,10 @@ def run_arm(problem, cfg, seed, steps, device):
     )
     ph = P["make_physics"](device)
     torch.manual_seed(seed + 10_000)
-    # Explicit rather than defaulted: these sweeps were sized against the paired
-    # path's memory, and a change of default elsewhere must not silently move
-    # them onto the other one.
-    pinn = PINN(net, ph, P["samp"], n_refine=1, adaptive_pde=True,
-                paired_coords=True, device=device)
+    pinn = PINN(net, ph, P["samp"], n_refine=1, adaptive_pde=True, device=device)
     tr = Trainer(pinn=pinn, lr=cfg["lr"], n_iter=steps, resample_every=1000,
                  checkpoint_every=10 ** 9, gradnorm_every=200, lra_alpha=0.01,
-                 balancing=cfg["balancing"], optimiser=cfg["optimiser"],
+                 optimiser=cfg["optimiser"],
                  param_every=cfg["param_every"], checkpoint_path="/tmp/bench",
                  run_name="bench", save_final=False, logger="none", device=device, progress=False,
                  log_every=max(1, steps // 10),
