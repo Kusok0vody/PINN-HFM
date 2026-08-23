@@ -59,6 +59,12 @@ def main():
     ap.add_argument("--dmu", type=int, default=64)
     ap.add_argument("--d-h", type=int, default=64)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--save", default=None, metavar="PATH",
+                    help="write the fitted network as a checkpoint, so a PINN "
+                         "run can start from it. That turns this probe into the "
+                         "one experiment that separates a bad landscape from a "
+                         "bad objective: put the network where the answer is "
+                         "and see whether the full loss keeps it there.")
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -139,6 +145,18 @@ def main():
         al, sh = decompose(pred[:, j].cpu(), target[:, j].cpu())
         v = "represented" if abs(al - 1) < 0.15 and sh < 0.25 else "NOT reached"
         print(f"{k:>8.2f} {al:>8.3f} {sh:>8.3f}   {v}")
+    if args.save:
+        out = pathlib.Path(args.save)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"step": 0, "run_name": "capacity_probe",
+                    "net": net.state_dict(),
+                    "net_config": net.serialize_config(),
+                    "optimiser": opt.state_dict(),
+                    "scheduler": None, "points": None, "weights": None,
+                    "balancing": "none"}, out)
+        print("")
+        print(f"saved to {out}")
+
     print()
     print("alpha near 1 everywhere means the architecture can hold these fields "
           "and the ceiling seen in training belongs to the objective or the "
