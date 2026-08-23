@@ -113,6 +113,7 @@ def main():
         res = pinn.step()
         for m in range(len(ks)):
             tot = 0.0
+            by = {}
             for group, terms in res.items():
                 # The equation term is homogeneous of degree zero in the field
                 # by construction, so it contributes the same at every scale and
@@ -122,26 +123,37 @@ def main():
                     continue
                 for key, v in terms.items():
                     w = trainer.adaptive_weights.get(f"{group}/{key}", 1.0)
-                    tot += w * float(v[:, m].pow(2).mean())
-            per_setting.setdefault(m, []).append((scale, tot))
+                    c = w * float(v[:, m].detach().pow(2).mean())
+                    tot += c
+                    by[group] = by.get(group, 0.0) + c
+            per_setting.setdefault(m, []).append((scale, tot, by))
     physics.transforms = base
 
     print()
-    print(f"{'k':>8} {'best scale':>11} {'loss at 1':>12} {'loss at best':>13}"
-          f"   {'verdict':>28}")
+    # A minimum one grid step away is not evidence of anything: what matters is
+    # how much lower the loss would be there. A tenth of a percent is noise; the
+    # near-pole settings need the amplitude to grow four to ten times, and a
+    # gain that small at 1.2x says the objective is not asking for it.
+    GAIN_MIN = 0.05
+
+    print(f"{'k':>8} {'best s':>7} {'gain':>7} {'bc(1)':>10} {'bc(best)':>10}"
+          f" {'data(1)':>10} {'data(best)':>10}   {'verdict':>12}")
     n_up = 0
     for m, rows in sorted(per_setting.items()):
-        at_one = dict(rows).get(1.0, float("nan"))
-        best_s, best_l = min(rows, key=lambda t: t[1])
-        if best_s > 1.0:
+        one = next(r for r in rows if r[0] == 1.0)
+        best = min(rows, key=lambda t: t[1])
+        gain = (one[1] - best[1]) / max(one[1], 1e-30)
+        if best[0] > 1.0 and gain > GAIN_MIN:
             n_up += 1
-            verdict = "wants more than it produced"
-        elif best_s < 1.0:
+            verdict = "wants more"
+        elif best[0] < 1.0 and gain > GAIN_MIN:
             verdict = "wants less"
         else:
             verdict = "content"
-        print(f"{ks[m]:>8.3f} {best_s:>11.2f} {at_one:>12.4e} {best_l:>13.4e}"
-              f"   {verdict:>28}")
+        print(f"{ks[m]:>8.3f} {best[0]:>7.2f} {100*gain:>6.1f}% "
+              f"{one[2].get('bc', 0):>10.3e} {best[2].get('bc', 0):>10.3e} "
+              f"{one[2].get('data', 0):>10.3e} {best[2].get('data', 0):>10.3e}"
+              f"   {verdict:>12}")
 
     print()
     if n_up == 0:
