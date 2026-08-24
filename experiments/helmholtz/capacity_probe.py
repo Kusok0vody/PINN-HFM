@@ -44,6 +44,7 @@ from geometry.sampler import Sampler
 from network.net import Net
 from network.activations import ActivationFactory, Sine
 from validation.references import helmholtz_annulus
+from utils import unpack_coords_paired, derivative_batched
 from eval_helmholtz import build_bounds, decompose
 
 R, r, N_ARCS = 3.0, 1.0, 8
@@ -73,6 +74,16 @@ def main():
                          "warm start is only a warm start if the boundary is as "
                          "good as an ordinary trained network gets it, which on "
                          "this problem is an rms of about 0.37.")
+    ap.add_argument("--lap-weight", type=float, default=0.0,
+                    help="weight of the Laplacian term in the regression. The "
+                         "target costs nothing: the exact solution satisfies "
+                         "laplace(u) = -k u, so supervising the second "
+                         "derivative needs only the values already computed. "
+                         "This is the question the probe exists for at nonzero "
+                         "weight — a fit to values alone was within 6 percent in "
+                         "L2 and had a PDE residual 345 times worse than a "
+                         "network 94 percent off, because nothing constrained "
+                         "what differentiating it twice would give.")
     ap.add_argument("--steps", type=int, default=5000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--dx", type=int, default=32)
@@ -151,6 +162,23 @@ def main():
     # whole loss.
     scale = target.pow(2).mean(dim=0, keepdim=True).sqrt().clamp_min(1e-6)
 
+    # Second derivatives are taken on the interior points only. On the boundary
+    # the truncated series rings around the jumps in the datum, and its
+    # Laplacian there is a property of the truncation rather than of the
+    # solution; supervising it would be fitting noise.
+    k_row = mu.reshape(1, -1)
+    lap_target = -k_row * target[:n_int]
+    lap_scale = lap_target.pow(2).mean(dim=0, keepdim=True).sqrt().clamp_min(1e-6)
+    coords_int = coords[:n_int]
+
+    def laplacian(c):
+        """laplace(u) of the network at c, one leaf per (point, setting) pair."""
+        un, X = unpack_coords_paired(c, False, 2, mu.shape[0])
+        u = net.forward_paired(X, mu)["u"]
+        u_xx = derivative_batched(derivative_batched(u, un["x"]), un["x"])
+        u_yy = derivative_batched(derivative_batched(u, un["y"]), un["y"])
+        return u, u_xx + u_yy
+
     print()
     print(f"{'step':>7} {'loss':>11}   " +
           "  ".join(f"a(k={k:g})" for k in args.k))
@@ -158,6 +186,11 @@ def main():
         opt.zero_grad()
         pred = net(coords, mu)["u"]
         loss = (w * ((pred - target) / scale).pow(2)).mean()
+        if args.lap_weight > 0:
+            _, lap = laplacian(coords_int)
+            loss = loss + args.lap_weight * (
+                ((lap - lap_target) / lap_scale).pow(2).mean()
+            )
         loss.backward()
         opt.step()
         sched.step()
@@ -172,7 +205,16 @@ def main():
     with torch.no_grad():
         pred = net(coords, mu)["u"]
     print()
-    print(f"{'k':>8} {'alpha':>8} {'shape':>8} {'bnd rms':>9}   verdict")
+    # The residual of the fitted network, which is what the PINN objective
+    # actually sees. Reported raw and relative to the field, because the
+    # training loss divides by the field size.
+    u_int, lap = laplacian(coords_int)
+    res = (lap + k_row * u_int).detach()
+    field = u_int.detach().pow(2).mean(dim=0).sqrt().clamp_min(1e-12)
+    res_rms = res.pow(2).mean(dim=0).sqrt()
+
+    print(f"{'k':>8} {'alpha':>8} {'shape':>8} {'bnd rms':>9} {'residual':>10}"
+          f" {'res/field':>10}   verdict")
     for j, k in enumerate(args.k):
         al, sh = decompose(pred[:, j].cpu(), target[:, j].cpu())
         # Reported separately because it is the number that decided whether the
@@ -181,7 +223,9 @@ def main():
         bnd = float((pred[n_int:, j] - target[n_int:, j]).pow(2).mean().sqrt())             if coords.shape[0] > n_int else float("nan")
         v = ("usable warm start" if abs(al - 1) < 0.15 and sh < 0.25 and bnd < 0.4
              else "NOT reached")
-        print(f"{k:>8.2f} {al:>8.3f} {sh:>8.3f} {bnd:>9.3f}   {v}")
+        print(f"{k:>8.2f} {al:>8.3f} {sh:>8.3f} {bnd:>9.3f} "
+              f"{float(res_rms[j]):>10.3e} {float(res_rms[j] / field[j]):>10.3f}"
+              f"   {v}")
     if args.save:
         out = pathlib.Path(args.save)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +243,16 @@ def main():
           "and the ceiling seen in training belongs to the objective or the "
           "optimisation. alpha falling off at the amplified settings means the "
           "architecture is the limit.")
+    print()
+    print("res/field is the number to read at nonzero --lap-weight. A trained "
+          "PINN on this problem sits near 1 at the amplified settings and near "
+          "0.3 elsewhere. If a fit that also matches the Laplacian gets it well "
+          "below that while keeping alpha near 1, then a network with both a "
+          "correct field and a small residual exists and is reachable by "
+          "fitting, and what training cannot do is find it. If the residual "
+          "stays high, this network cannot represent the solution in the norm "
+          "the objective measures, and nothing about the objective, the "
+          "balancing or the optimiser is the explanation.")
 
 
 if __name__ == "__main__":
