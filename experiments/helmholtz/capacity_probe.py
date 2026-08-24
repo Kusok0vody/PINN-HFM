@@ -53,6 +53,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=float, nargs="+", default=[1.0, 6.3, 10.0, 14.5])
     ap.add_argument("--n-points", type=int, default=4096)
+    ap.add_argument("--n-boundary", type=int, default=1024,
+                    help="boundary points added to the regression. Fitting the "
+                         "interior alone leaves the boundary to extrapolation, "
+                         "and where the solution is amplified that extrapolation "
+                         "misses by more than the boundary datum itself: a fit "
+                         "with a relative error of 0.14 at an interior amplitude "
+                         "of 8 was out by an rms of 1.96 against data of size 1. "
+                         "A warm start like that is not the solution, and a PINN "
+                         "objective is right to leave it.")
     ap.add_argument("--steps", type=int, default=5000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--dx", type=int, default=32)
@@ -88,8 +97,12 @@ def main():
     print(f"net dx={args.dx} dmu={args.dmu} d_h={args.d_h}, {n_par} weights")
 
     samp = Sampler(Geometry(build_bounds(), dim=2, has_time=False),
-                   n_interior=args.n_points, n_boundary=64)
-    coords = samp.sample().interior.coords
+                   n_interior=args.n_points,
+                   n_boundary=max(1, args.n_boundary // (2 * N_ARCS)))
+    pts    = samp.sample()
+    coords = pts.interior.coords
+    if args.n_boundary > 0:
+        coords = torch.cat([coords] + [b.coords for b in pts.boundaries.values()])
     y, x = coords[:, 0].numpy(), coords[:, 1].numpy()
 
     mu = torch.tensor([[k] for k in args.k], dtype=torch.float32)
@@ -97,7 +110,9 @@ def main():
         [[helmholtz_annulus(x, y, float(k), r, R, N_ARCS)] for k in args.k],
         dtype=torch.float32,
     ).squeeze(1).T.contiguous()
-    print(f"{coords.shape[0]} points, {len(args.k)} settings, "
+    n_int = pts.interior.coords.shape[0]
+    print(f"{n_int} interior + {coords.shape[0] - n_int} boundary points, "
+          f"{len(args.k)} settings, "
           f"reference rms {[round(float(target[:, j].pow(2).mean().sqrt()), 2) for j in range(len(args.k))]}")
 
     # The same input rescaling the runs use, so the network sees what it is

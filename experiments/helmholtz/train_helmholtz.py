@@ -90,13 +90,20 @@ ks = torch.linspace(K_MIN, K_MAX, N_K)
 parameters = [{"k": k.item()} for k in ks]
 limits = {"k": {"min": K_MIN, "max": K_MAX, "N": N_K, "scale": "linear"}}
 
+# Dirichlet eigenvalues inside the sweep are no longer an error: the physics
+# rejects settings whose solution is amplified past AMPLIFICATION_MAX and the
+# sweep redraws them, so the poles are holes in the range rather than a reason
+# to stop. Worth saying out loud, though — the family is genuinely
+# discontinuous across each one, the exact solution changes sign there, and no
+# parameterisation smooth in k spans that. Points evaluated inside a hole are
+# wrong for that reason, not for one training could fix.
 poles = helmholtz_annulus_resonances(K_MIN, K_MAX, r, R, 8)
 if poles:
-    raise SystemExit(
-        f"sweep [{K_MIN}, {K_MAX}] contains Dirichlet eigenvalues "
-        f"{[round(v, 3) for v in poles]}; pick a range between them"
-    )
-print(f"sweep k in [{K_MIN}, {K_MAX}], {N_K} settings, no eigenvalues inside")
+    print(f"sweep k in [{K_MIN}, {K_MAX}] with {N_K} settings; Dirichlet "
+          f"eigenvalues at {[round(v, 3) for v in poles]} are excluded by the "
+          f"physics and redrawn")
+else:
+    print(f"sweep k in [{K_MIN}, {K_MAX}], {N_K} settings, no eigenvalues inside")
 
 physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
 physics.setParameters(
@@ -105,6 +112,17 @@ physics.setParameters(
     initial=None,
     limits=limits
 )
+
+from network.net import Net as _N
+_N.load_weights(net, torch.load("checkpoints/warm.pt", weights_only=False)["net"])
+# The batch above came from a linspace, which knows nothing about which
+# settings are worth training on: over [1, 20] it lands on k = 6.516, whose
+# exact solution reaches 988 against a boundary datum of 1. Drawing the first
+# batch through the sweep instead applies the same rejection every later batch
+# gets, and pins the ends of the range while it is at it.
+physics._resample_parameters()
+print("initial settings:",
+      [round(v, 3) for v in physics.par.tensor.flatten().tolist()])
 
 pinn = PINN(
     net, physics, samp,
