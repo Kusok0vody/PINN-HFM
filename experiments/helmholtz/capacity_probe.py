@@ -62,6 +62,17 @@ def main():
                          "of 8 was out by an rms of 1.96 against data of size 1. "
                          "A warm start like that is not the solution, and a PINN "
                          "objective is right to leave it.")
+    ap.add_argument("--boundary-weight", type=float, default=1.0,
+                    help="weight of the boundary points in the regression. At 1 "
+                         "they are a fifth of the sample and lose: fitting the "
+                         "annulus interior alone left the outer ring out by an "
+                         "rms of 1.96 against data of size 1, and adding "
+                         "unweighted boundary points made it 5.24, because the "
+                         "boundary datum is a square wave whose truncated series "
+                         "rings and cannot be fitted at all near its jumps. A "
+                         "warm start is only a warm start if the boundary is as "
+                         "good as an ordinary trained network gets it, which on "
+                         "this problem is an rms of about 0.37.")
     ap.add_argument("--steps", type=int, default=5000)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--dx", type=int, default=32)
@@ -124,6 +135,12 @@ def main():
                          mu_hi=torch.tensor([max(args.k)]),
                          mu_log=torch.zeros(1, dtype=torch.bool))
 
+    # Per point, so the boundary can be made to count for more than its share
+    # of the sample without changing anything else.
+    w = torch.ones(coords.shape[0], 1)
+    w[n_int:] = args.boundary_weight
+    w = (w / w.mean()).to(device)
+
     coords, target, mu = coords.to(device), target.to(device), mu.to(device)
     opt = torch.optim.NAdam(net.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps,
@@ -140,7 +157,7 @@ def main():
     for step in range(args.steps + 1):
         opt.zero_grad()
         pred = net(coords, mu)["u"]
-        loss = ((pred - target) / scale).pow(2).mean()
+        loss = (w * ((pred - target) / scale).pow(2)).mean()
         loss.backward()
         opt.step()
         sched.step()
@@ -155,11 +172,16 @@ def main():
     with torch.no_grad():
         pred = net(coords, mu)["u"]
     print()
-    print(f"{'k':>8} {'alpha':>8} {'shape':>8}   verdict")
+    print(f"{'k':>8} {'alpha':>8} {'shape':>8} {'bnd rms':>9}   verdict")
     for j, k in enumerate(args.k):
         al, sh = decompose(pred[:, j].cpu(), target[:, j].cpu())
-        v = "represented" if abs(al - 1) < 0.15 and sh < 0.25 else "NOT reached"
-        print(f"{k:>8.2f} {al:>8.3f} {sh:>8.3f}   {v}")
+        # Reported separately because it is the number that decided whether the
+        # last two warm starts were usable, and both times it was not looked at
+        # until after the run that depended on it.
+        bnd = float((pred[n_int:, j] - target[n_int:, j]).pow(2).mean().sqrt())             if coords.shape[0] > n_int else float("nan")
+        v = ("usable warm start" if abs(al - 1) < 0.15 and sh < 0.25 and bnd < 0.4
+             else "NOT reached")
+        print(f"{k:>8.2f} {al:>8.3f} {sh:>8.3f} {bnd:>9.3f}   {v}")
     if args.save:
         out = pathlib.Path(args.save)
         out.parent.mkdir(parents=True, exist_ok=True)
