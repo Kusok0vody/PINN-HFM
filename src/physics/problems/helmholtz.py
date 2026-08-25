@@ -1,7 +1,46 @@
+import math
+
 import torch
 from physics.phys import Physics
 from utils import derivative_batched, unpack_coords
 from geometry.sampler import BoundaryBatch
+
+
+def harmonic_annulus(rho, theta, r_in, r_out, n_arcs=8, n_terms=16):
+    """
+    Harmonic function on the annulus with the arc boundary data, in torch.
+
+    Solves laplace(G) = 0 with G = 0 on rho = r_in and G = sgn(sin(m theta)) on
+    rho = r_out, truncated to n_terms modes. Separation of variables gives power
+    laws rather than Bessel functions, so every term is elementary:
+
+        H_n(rho) = [(rho/r_out)^n - (r_in^2 / (rho r_out))^n] / [1 - (r_in/r_out)^(2n)]
+
+    which is 0 at r_in and exactly 1 at r_out. The square wave contributes only
+    orders n = m, 3m, 5m, ..., with m = n_arcs / 2, and coefficients 4/(pi j).
+
+    Written with every base below one on purpose. The textbook form
+    (rho/r_in)^n - (r_in/rho)^n overflows float32 by n = 20 on a 1:3 annulus,
+    where (3)^20 is 3.5e9, and the same factor cancels out of the ratio anyway.
+
+    Why harmonic and not, say, a smooth interpolation of the boundary data: this
+    G enters a residual that differentiates it twice, and for a harmonic G that
+    second derivative is exactly zero. Nothing has to be computed, nothing can
+    be inaccurate, and the discontinuity of the boundary datum — which has
+    unbounded derivatives near its jumps — never reaches the residual at all.
+    The truncation is what is paid instead: the trace on the outer ring is the
+    partial Fourier sum, which rings near the jumps by a fixed amount that no
+    amount of training would have removed either.
+    """
+    m = n_arcs // 2
+    q = r_in / r_out
+    g = torch.zeros_like(rho)
+    for j in range(1, 2 * n_terms, 2):
+        n = m * j
+        a = (rho / r_out) ** n
+        b = (r_in * r_in / (rho * r_out)) ** n
+        g = g + (4.0 / math.pi) * (a - b) / (1.0 - q ** (2 * n)) * torch.sin(n * theta) / j
+    return g
 
 
 class helmholtz2D_annulus(Physics):
@@ -19,13 +58,38 @@ class helmholtz2D_annulus(Physics):
     has_reference = True
 
     def __init__(self, device="cpu", dim=2, has_time=False,
-                 r_in: float = 1.0, r_out: float = 3.0, n_arcs: int = 8):
+                 r_in: float = 1.0, r_out: float = 3.0, n_arcs: int = 8,
+                 hard_bc: bool = False, hard_bc_terms: int = 16):
         super().__init__(device, dim, has_time)
         # Geometry of the annulus the closed form belongs to. The boundaries
         # dict passed to setParameters describes the same thing, but as arc
         # parameterisations that would have to be reverse-engineered into radii;
         # asking for them is cheaper and cannot be wrong by inference.
         self.r_in, self.r_out, self.n_arcs = r_in, r_out, n_arcs
+
+        # Imposing the boundary by construction rather than by penalty. Both
+        # conditions are homogeneous in the network: u = G + D N with G carrying
+        # the data and D vanishing on both rings, so every N satisfies them and
+        # sixteen loss terms disappear. That number is the reason to want this
+        # here: the balancing rules in the literature are written for two to
+        # four terms, and a boundary described as arcs turns one condition into
+        # eight.
+        self.hard_bc = hard_bc
+        self.hard_bc_terms = hard_bc_terms
+        if hard_bc:
+            self.output_ansatz = {"u": self._hard_bc}
+
+    def _hard_bc(self, u, coords):
+        x, y = coords["x"], coords["y"]
+        rho = torch.sqrt(x * x + y * y)
+        th = torch.atan2(y, x)
+        g = harmonic_annulus(rho, th, self.r_in, self.r_out, self.n_arcs,
+                             self.hard_bc_terms)
+        # Zero on both rings, 1 at mid-radius for the 1:3 annulus, and analytic
+        # everywhere between. Nothing about it depends on the parameter, so the
+        # same window serves every setting of the sweep.
+        d = (rho - self.r_in) * (self.r_out - rho)
+        return g + d * u
 
     # Largest solution the sweep is allowed to draw, for a boundary datum of
     # size one. Above this the problem is not hard but pointless: the boundary
@@ -133,7 +197,10 @@ class helmholtz2D_annulus(Physics):
         }
 
     def residualBC(self, pred: dict, coords_bc: dict, batch: BoundaryBatch) -> dict:
-        if batch.name not in self.boundaries:
+        # Under the hard ansatz the conditions hold identically, so a penalty
+        # for them would be a term that is zero by construction and still
+        # consumes a share of the balancing.
+        if self.hard_bc or batch.name not in self.boundaries:
             return {}
 
         x  = coords_bc["x"]

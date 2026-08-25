@@ -301,6 +301,11 @@ def main():
     ap.add_argument("--jump-bins", type=int, default=6,
                     help="bins of the outer-ring error profile, from a jump in "
                          "the boundary datum to the middle of an arc")
+    ap.add_argument("--hard-bc", action="store_true",
+                    help="the checkpoint was trained with the hard boundary "
+                         "ansatz. Without this the network output is read as "
+                         "the solution when it is only the free part of it, "
+                         "and every number below is wrong without saying so.")
     ap.add_argument("--res-chunk", type=int, default=2048,
                     help="points per chunk when computing the PDE residual; the "
                          "second-order graph is what fills the card, so lower "
@@ -332,7 +337,8 @@ def main():
     geo    = Geometry(bounds, dim=2, has_time=False)
     samp   = Sampler(geo, n_interior=1024, n_boundary=64)
 
-    physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
+    physics = helmholtz2D_annulus(dim=2, has_time=False, device=device,
+                              hard_bc=args.hard_bc)
     physics.setParameters(params=[{"k": k} for k in args.k], boundaries=bounds)
 
     if args.history > 0:

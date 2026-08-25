@@ -54,6 +54,11 @@ def main():
     ap.add_argument("--n-k", type=int, default=32)
     ap.add_argument("--n-points", type=int, default=4096)
     ap.add_argument("--n-data", type=int, default=256)
+    ap.add_argument("--hard-bc", action="store_true",
+                    help="the checkpoint was trained with the hard boundary "
+                         "ansatz. Without this the network output is read as "
+                         "the solution when it is only the free part of it, "
+                         "and every number below is wrong without saying so.")
     ap.add_argument("--scales", type=float, nargs="+",
                     default=[0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 3.0, 5.0])
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -68,7 +73,8 @@ def main():
     bounds  = build_bounds()
     samp    = Sampler(Geometry(bounds, dim=2, has_time=False),
                       n_interior=args.n_points, n_boundary=64)
-    physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
+    physics = helmholtz2D_annulus(dim=2, has_time=False, device=device,
+                              hard_bc=args.hard_bc)
     physics.setParameters(
         params=[{"k": float(v)} for v in
                 torch.linspace(args.k_min, args.k_max, args.n_k)],
