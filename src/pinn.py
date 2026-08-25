@@ -595,6 +595,10 @@ class PINN(nn.Module):
             dict with keys "pde", "bc", "ic", "extra"
             each value is a dict of named residual tensors
         """
+        # One step, one estimate of the output scale: every residual below has
+        # to be written about the same field.
+        self.net.begin_step()
+
         if self.points is None:
             self.resample()
             # self.resample_adaptive()

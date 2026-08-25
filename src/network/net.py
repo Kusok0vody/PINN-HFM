@@ -317,6 +317,18 @@ class Net(nn.Module):
             self.register_buffer("head_scale_ready",
                                  torch.zeros(len(outputs_config)))
 
+            # Refreshed once per optimisation step, not once per forward.
+            #
+            # A step evaluates the network several times — the equation on the
+            # collocation pool, the data term on its own points — and those are
+            # terms of one problem about one field. Re-estimating between them
+            # would divide each by a different number, so the equation and the
+            # data would be written about fields that differ by a per cent or
+            # two, and the residuals would no longer be comparable. It also
+            # bumps the version of a tensor the retained graphs still hold,
+            # which is how this first showed up: a backward refusing to run.
+            self._scale_stale = True
+
         self._init_weights()
 
     def _init_weights(self):
@@ -418,6 +430,16 @@ class Net(nn.Module):
     # divide by zero; at any reachable state the scale is of order one.
     MAGNITUDE_FLOOR = 1e-12
 
+    def begin_step(self):
+        """Let the running head scale be re-estimated at the next forward.
+
+        Called once per optimisation step by whoever drives training. A network
+        that is only being evaluated never calls it, and then the scale is
+        whatever the checkpoint stored, which is what makes evaluation a
+        function of the point rather than of the batch it arrived in.
+        """
+        self._scale_stale = True
+
     def _apply_magnitude(self, out: dict, z_mu: torch.Tensor) -> dict:
         """Scale each field by its per-setting gain over the running head scale."""
         if self.magnitude is None:
@@ -427,7 +449,7 @@ class Net(nn.Module):
         for j, name in enumerate(self.magnitude_names):
             v = out[name]
 
-            if self.training:
+            if self.training and self._scale_stale:
                 with torch.no_grad():
                     cur = v.pow(2).mean().sqrt().clamp_min(self.MAGNITUDE_FLOOR)
                     # Seeded from the first batch rather than eased in from
@@ -442,6 +464,8 @@ class Net(nn.Module):
                             (1.0 - self.MAGNITUDE_MOMENTUM) * self.head_scale[j]
                             + self.MAGNITUDE_MOMENTUM * cur
                         )
+                if j == len(self.magnitude_names) - 1:
+                    self._scale_stale = False
 
             # The divisor carries no gradient, so it is a constant of the graph
             # and every spatial derivative below is the exact derivative of the
@@ -453,8 +477,11 @@ class Net(nn.Module):
             # (1, M) against (N, M): the gain varies with the setting and is
             # constant in the coordinate, so it passes through every spatial
             # derivative as a factor and changes no residual's structure.
+            # A copy, not the buffer itself: the buffer is written in place
+            # at the start of every step, and a graph still holding it would
+            # find its version changed underneath and refuse to run backward.
             out[name] = (torch.exp(log_s[:, j]).unsqueeze(0) * v
-                         / self.head_scale[j])
+                         / self.head_scale[j].detach().clone())
         return out
 
     def forward(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
