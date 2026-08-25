@@ -25,9 +25,13 @@ from pinn import PINN
 from eval_helmholtz import build_bounds, plot_comparison, resolve_checkpoint
 
 CHECKPOINT = "checkpoints/helmholtz"     # a ckpt_<step>.pt or the directory
-KS         = [10.0]                      # must be what the run was trained on
+KS         = [1.0, 6.0, 7.0, 13.0, 15.0, 20.0, 25.0]                      # must be what the run was trained on
 N          = 601                         # cartesian resolution of the figure
 OUTDIR     = "figures"
+# Must match how the checkpoint was trained. Without it the network
+# output is drawn as the solution when it is only the free part of it,
+# and the picture is wrong without looking wrong.
+HARD_BC    = True
 
 torch.manual_seed(42)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -41,7 +45,8 @@ print(f"checkpoint {path}, step {step}")
 
 bounds  = build_bounds()
 samp    = Sampler(Geometry(bounds, dim=2, has_time=False), n_interior=16, n_boundary=8)
-physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
+physics = helmholtz2D_annulus(dim=2, has_time=False, device=device,
+                              hard_bc=HARD_BC)
 physics.setParameters(params=[{"k": k} for k in KS], boundaries=bounds)
 
 # The checkpoint carries the input rescaling it was trained under; recomputing

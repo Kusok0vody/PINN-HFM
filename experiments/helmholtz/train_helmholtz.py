@@ -105,7 +105,7 @@ if poles:
 else:
     print(f"sweep k in [{K_MIN}, {K_MAX}], {N_K} settings, no eigenvalues inside")
 
-physics = helmholtz2D_annulus(dim=2, has_time=False, device=device)
+physics = helmholtz2D_annulus(dim=2, has_time=False, hard_bc=True, device=device)
 physics.setParameters(
     params=parameters,
     boundaries=bounds,
@@ -113,16 +113,16 @@ physics.setParameters(
     limits=limits
 )
 
-from network.net import Net as _N
-_N.load_weights(net, torch.load("checkpoints/warm.pt", weights_only=False)["net"])
+# from network.net import Net as _N
+# _N.load_weights(net, torch.load("checkpoints/warm.pt", weights_only=False)["net"])
 # The batch above came from a linspace, which knows nothing about which
 # settings are worth training on: over [1, 20] it lands on k = 6.516, whose
 # exact solution reaches 988 against a boundary datum of 1. Drawing the first
 # batch through the sweep instead applies the same rejection every later batch
 # gets, and pins the ends of the range while it is at it.
-physics._resample_parameters()
-print("initial settings:",
-      [round(v, 3) for v in physics.par.tensor.flatten().tolist()])
+# physics._resample_parameters()
+# print("initial settings:",
+#       [round(v, 3) for v in physics.par.tensor.flatten().tolist()])
 
 pinn = PINN(
     net, physics, samp,

@@ -121,11 +121,19 @@ def main():
             tot = 0.0
             by = {}
             for group, terms in res.items():
-                # The equation term is homogeneous of degree zero in the field
-                # by construction, so it contributes the same at every scale and
-                # is left out of the comparison rather than added identically to
-                # both sides of it.
-                if group == "pde":
+                # Without the hard ansatz the whole field is what gets scaled,
+                # the scale-free residual is homogeneous of degree zero in it,
+                # and the equation term is identical at every scale — nothing to
+                # compare, so it is left out.
+                #
+                # With the ansatz it is not. There u = G + D N and only N is
+                # scaled, so the field changes by something other than a
+                # constant factor and the residual genuinely moves. Dropping the
+                # term then would hide the only part of the objective that can
+                # still object to a larger amplitude, since the boundary no
+                # longer can: D vanishes on both rings, so scaling N leaves the
+                # boundary values exactly where they were.
+                if group == "pde" and not args.hard_bc:
                     continue
                 for key, v in terms.items():
                     w = trainer.adaptive_weights.get(f"{group}/{key}", 1.0)
@@ -142,8 +150,10 @@ def main():
     # gain that small at 1.2x says the objective is not asking for it.
     GAIN_MIN = 0.05
 
-    print(f"{'k':>8} {'best s':>7} {'gain':>7} {'bc(1)':>10} {'bc(best)':>10}"
-          f" {'data(1)':>10} {'data(best)':>10}   {'verdict':>12}")
+    third = "pde" if args.hard_bc else "bc"
+    print(f"{'k':>8} {'best s':>7} {'gain':>7} {third + '(1)':>10} "
+          f"{third + '(best)':>10} {'data(1)':>10} {'data(best)':>10}"
+          f"   {'verdict':>12}")
     n_up = 0
     for m, rows in sorted(per_setting.items()):
         one = next(r for r in rows if r[0] == 1.0)
@@ -157,7 +167,7 @@ def main():
         else:
             verdict = "content"
         print(f"{ks[m]:>8.3f} {best[0]:>7.2f} {100*gain:>6.1f}% "
-              f"{one[2].get('bc', 0):>10.3e} {best[2].get('bc', 0):>10.3e} "
+              f"{one[2].get(third, 0):>10.3e} {best[2].get(third, 0):>10.3e} "
               f"{one[2].get('data', 0):>10.3e} {best[2].get('data', 0):>10.3e}"
               f"   {verdict:>12}")
 
