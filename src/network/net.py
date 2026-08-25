@@ -291,6 +291,32 @@ class Net(nn.Module):
             self.magnitude = nn.Linear(dmu, len(outputs_config))
             torch.random.set_rng_state(rng)
 
+            # Running scale of the head output, one per variable, in the sense
+            # BatchNorm keeps running statistics: estimated from the batch while
+            # training, frozen and reused at evaluation. Both halves matter.
+            #
+            # Dividing by it is what stops the gain and the trunk from drifting
+            # apart. They are redundant — the field is their product — and a
+            # pinned product does not pin the factors. Measured on the first run
+            # with this head: the gain grew between three and five times over
+            # twenty thousand steps while the field stayed within seven per cent
+            # of correct, so the trunk shrank by as much, and the drift was
+            # still thirty per cent over the last two thousand steps. That is
+            # not cosmetic. The trunk's gradient is multiplied by the gain, so a
+            # gain growing through training inflates the effective step in
+            # function space exactly while the schedule is trying to shrink it,
+            # and the last few per cent of amplitude never settles.
+            #
+            # Freezing it at evaluation is what keeps the network a function of
+            # the point. Estimated fresh from whatever batch is at hand, the
+            # field would depend on which points it was evaluated on, and a
+            # 601x601 picture would not show the same solution the collocation
+            # points saw.
+            self.register_buffer("head_scale",
+                                 torch.ones(len(outputs_config)))
+            self.register_buffer("head_scale_ready",
+                                 torch.zeros(len(outputs_config)))
+
         self._init_weights()
 
     def _init_weights(self):
@@ -383,17 +409,52 @@ class Net(nn.Module):
             mu = torch.where(self.mu_log, mu.clamp_min(1e-30).log(), mu)
         return self._rescale(mu, self.mu_lo, self.mu_hi)
 
+    # How much of the running scale is replaced per step. Slow on purpose: this
+    # tracks a drift that took thousands of steps to build, and a fast estimate
+    # would instead follow the batch-to-batch noise of the collocation draw and
+    # feed it straight into the field.
+    MAGNITUDE_MOMENTUM = 0.01
+    # Numerical only. A head output identically zero over a whole batch would
+    # divide by zero; at any reachable state the scale is of order one.
+    MAGNITUDE_FLOOR = 1e-12
+
     def _apply_magnitude(self, out: dict, z_mu: torch.Tensor) -> dict:
-        """Multiply each field by its own per-setting gain exp(s(µ))."""
+        """Scale each field by its per-setting gain over the running head scale."""
         if self.magnitude is None:
             return out
 
         log_s = self.magnitude(z_mu)                       # (M, n_outputs)
         for j, name in enumerate(self.magnitude_names):
+            v = out[name]
+
+            if self.training:
+                with torch.no_grad():
+                    cur = v.pow(2).mean().sqrt().clamp_min(self.MAGNITUDE_FLOOR)
+                    # Seeded from the first batch rather than eased in from
+                    # one: the head does not start at unit scale, and easing
+                    # from 1.0 at this momentum would take thousands of steps
+                    # to arrive, dividing by a wrong number the whole way.
+                    if self.head_scale_ready[j] == 0:
+                        self.head_scale[j] = cur
+                        self.head_scale_ready[j] = 1
+                    else:
+                        self.head_scale[j] = (
+                            (1.0 - self.MAGNITUDE_MOMENTUM) * self.head_scale[j]
+                            + self.MAGNITUDE_MOMENTUM * cur
+                        )
+
+            # The divisor carries no gradient, so it is a constant of the graph
+            # and every spatial derivative below is the exact derivative of the
+            # function actually being evaluated. Attaching it would make the
+            # output depend on all the other points in the batch, and autograd
+            # would differentiate that dependence too — the Laplacian this
+            # problem is made of would be wrong, quietly.
+            #
             # (1, M) against (N, M): the gain varies with the setting and is
             # constant in the coordinate, so it passes through every spatial
             # derivative as a factor and changes no residual's structure.
-            out[name] = torch.exp(log_s[:, j]).unsqueeze(0) * out[name]
+            out[name] = (torch.exp(log_s[:, j]).unsqueeze(0) * v
+                         / self.head_scale[j])
         return out
 
     def forward(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
@@ -546,6 +607,13 @@ class Net(nn.Module):
 
     RESCALE_BUFFERS = ("x_lo", "x_hi", "mu_lo", "mu_hi")
 
+    # Written by runs that had the amplitude head before it was normalised. A
+    # checkpoint from one of those is still readable: the buffers default to
+    # one and not ready, which divides by one and so reproduces exactly what
+    # that run computed. Refusing it would strand the runs that produced the
+    # measurement this normalisation was added for.
+    MAGNITUDE_BUFFERS = ("head_scale", "head_scale_ready")
+
     @staticmethod
     def load_weights(net: "Net", state: dict) -> "Net":
         """
@@ -561,14 +629,18 @@ class Net(nn.Module):
                  if not k.startswith(("log_gain.", "gain_mu."))}
         missing, unexpected = net.load_state_dict(state, strict=False)
 
-        absent = set(missing) - set(Net.RESCALE_BUFFERS)
+        absent = set(missing) - set(Net.RESCALE_BUFFERS) - set(Net.MAGNITUDE_BUFFERS)
         if absent or unexpected:
             raise RuntimeError(
                 f"checkpoint does not match this architecture — "
                 f"missing {sorted(absent)}, unexpected {sorted(unexpected)}"
             )
 
-        if missing:
+        if set(missing) & set(Net.MAGNITUDE_BUFFERS):
+            print("checkpoint predates the normalised amplitude head: its head "
+                  "scale is taken as one, which is what that run divided by")
+
+        if set(missing) & set(Net.RESCALE_BUFFERS):
             for name in Net.RESCALE_BUFFERS:
                 getattr(net, name).fill_(-1.0 if name.endswith("_lo") else 1.0)
             print(

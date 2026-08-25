@@ -68,19 +68,26 @@ def main():
         net.eval()
         with torch.no_grad():
             z = net.encoder_mu(net._rescale_mu(mu))
-            rows.append((step, torch.exp(net.magnitude(z))[:, 0].tolist()))
+            rows.append((step,
+                         torch.exp(net.magnitude(z))[:, 0].tolist(),
+                         float(net.head_scale[0])))
 
     head = "".join(f"{k:>9.2f}" for k in args.k)
-    print(f"{'step':>7}{head}{'  max drift':>12}")
+    # The head scale next to the gains is the pair that matters. The field is
+    # their quotient, so gains climbing while the scale climbs with them is the
+    # normalisation doing its job — the two moving apart is the drift this was
+    # added to stop, and only seeing both at once tells them apart.
+    print(f"{'step':>7}{head}{'  scale':>9}{'  max drift':>12}")
     prev = None
-    for step, g in rows:
+    for step, g, hs in rows:
         # Drift since the previous reported checkpoint, as a fraction. This is
         # the number the question turns on: a run that has converged in this
         # coordinate reports drift falling toward zero, and one that was cut
         # short reports drift that is still substantial at the last row.
         drift = ("" if prev is None else
                  f"{max(abs(a - b) / max(b, 1e-12) for a, b in zip(g, prev)):>11.1%}")
-        print(f"{step:>7}" + "".join(f"{v:>9.4f}" for v in g) + f"{drift:>12}")
+        print(f"{step:>7}" + "".join(f"{v:>9.4f}" for v in g)
+              + f"{hs:>9.4f}" + f"{drift:>12}")
         prev = g
 
     if len(rows) > 1:

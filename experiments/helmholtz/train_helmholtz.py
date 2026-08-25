@@ -87,8 +87,26 @@ net = Net(
     magnitude=True,
 )
 
-K_MIN = 1.0
-K_MAX = 20.0
+# The control for the amplitude ceiling.
+#
+# Over the wide range the settings that need a large field are both rare and
+# short-lived: a uniform draw over [1, 20] puts on average one and a half of
+# thirty-two settings above amplitude 15, the median setting is amplified 4.1
+# times, and param_every replaces the whole batch every thousand steps, so any
+# one strongly amplified setting is present for a thousand steps and gone. A
+# ceiling measured under that cannot be told apart from simply not having been
+# asked often enough.
+#
+# This band asks nothing else. Every setting in it is amplified between 6.3 and
+# 47.8 — the lower end already at the ceiling the wide run reached, the upper
+# six times past it — and none is amplified past AMPLIFICATION_MAX, so nothing
+# is rejected and nothing is redrawn.
+#
+# It stops short of the eigenvalue at 6.513 on purpose. A band straddling it
+# would also have to represent the sign change across the pole, and a bad
+# result would not say which of the two the network failed at.
+K_MIN = 5.8
+K_MAX = 6.44
 N_K   = 32
 
 ks = torch.linspace(K_MIN, K_MAX, N_K)
@@ -154,7 +172,7 @@ trainer = Trainer(
     lra_alpha=0.01,
     use_data=True,
     checkpoint_path="checkpoints",
-    run_name="helmholtz",
+    run_name="helmholtz_band",
     save_final=True,
     logger="tqdm",
     device=device,
