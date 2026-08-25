@@ -80,6 +80,11 @@ net = Net(
     use_film=True,
     film_layers=1,
     use_fourier=False,
+    # One amplitude per parameter setting, on top of what the shared weights
+    # produce. The sweep spans settings whose solutions differ in size by more
+    # than an order of magnitude, and FiLM was the only place that difference
+    # could come from.
+    magnitude=True,
 )
 
 K_MIN = 1.0

@@ -109,6 +109,7 @@ class Net(nn.Module):
         film_activation     = None,
         use_film:           bool  = True,
         use_fourier:        bool  = True,
+        magnitude:          bool  = False,
         n_freqs:            int   = 16,
         omega_min:          float = 1.0,
         omega_max:          float = 64.0,
@@ -133,6 +134,7 @@ class Net(nn.Module):
             "outputs_config":     outputs_config,
             "use_film":           use_film,
             "use_fourier":        use_fourier,
+            "magnitude":          magnitude,
             "n_freqs":            n_freqs,
             "omega_min":          omega_min,
             "omega_max":          omega_max,
@@ -245,6 +247,50 @@ class Net(nn.Module):
                     num_layers=head_layers,
                     activation=act_out,
                 )
+        # Amplitude as its own coordinate: one scalar per output variable and
+        # per parameter setting, multiplying the head.
+        #
+        # Without it the size of the field is a property of the shared weights,
+        # and a sweep asks one trunk for solutions whose amplitudes differ by
+        # orders of magnitude. Near a resonance of the Helmholtz annulus the
+        # exact solution grows without bound while its neighbours in the sweep
+        # stay at order one, and the only per-setting freedom is FiLM, which has
+        # to buy a threefold field against twenty-nine settings that want it
+        # left where it is. Measured on a trained run under the hard boundary
+        # ansatz: at three of thirty-two settings the loss would fall by a fifth
+        # to a third at three times the amplitude reached, with an interior
+        # minimum — the objective was asking for a field the optimiser could not
+        # deliver through shared weights.
+        #
+        # This does leave the amplitude expressible two ways, here or in the
+        # trunk. That redundancy is harmless; what was not harmless was the
+        # multiplicative gain this replaces, and the difference is worth being
+        # precise about. There, every derivative of the field being proportional
+        # to the field made shrinking the gain lower every residual at once, so
+        # u = 0 was a fixed point of the whole objective and one run reached it
+        # exactly. That argument needs every term to vanish with the field, and
+        # it no longer holds: the data residual is (u - u*) / scale, which at
+        # u = 0 is of order one rather than zero. The term that knows the true
+        # amplitude is what makes an explicit amplitude safe to expose.
+        #
+        # Normalising the head by its rms over the batch would remove the
+        # redundancy outright, and is deliberately not done: it would make the
+        # output a function of the whole point set rather than of the point, and
+        # autograd would differentiate the normaliser too, so every reported
+        # derivative — the Laplacian this problem is made of — would be wrong.
+        self.magnitude_names = tuple(outputs_config) if magnitude else ()
+        self.magnitude = None
+        if magnitude:
+            # Built last, and with the random stream put back where it was:
+            # nn.Linear draws at construction, and those draws would shift every
+            # initialisation that follows. Turning this flag on at a fixed seed
+            # then leaves every other weight bit-for-bit unchanged, so an A/B
+            # run differs by the thing under test and nothing else. The draws
+            # themselves are discarded — the layer is zeroed just below.
+            rng = torch.random.get_rng_state()
+            self.magnitude = nn.Linear(dmu, len(outputs_config))
+            torch.random.set_rng_state(rng)
+
         self._init_weights()
 
     def _init_weights(self):
@@ -262,6 +308,14 @@ class Net(nn.Module):
 
         for mlp in [self.encoder_x, self.encoder_mu, self.trunk]:
             init_mlp(mlp)
+
+        # Zero weight and bias means log s = 0, so every setting starts at gain
+        # exactly one and the network begins as the one it would have been
+        # without this at all. The amplitude spread is then something training
+        # produces, not something initialisation has to be undone from.
+        if self.magnitude is not None:
+            nn.init.zeros_(self.magnitude.weight)
+            nn.init.zeros_(self.magnitude.bias)
 
         if self.film is not None:
             init_mlp(self.film)
@@ -329,6 +383,19 @@ class Net(nn.Module):
             mu = torch.where(self.mu_log, mu.clamp_min(1e-30).log(), mu)
         return self._rescale(mu, self.mu_lo, self.mu_hi)
 
+    def _apply_magnitude(self, out: dict, z_mu: torch.Tensor) -> dict:
+        """Multiply each field by its own per-setting gain exp(s(µ))."""
+        if self.magnitude is None:
+            return out
+
+        log_s = self.magnitude(z_mu)                       # (M, n_outputs)
+        for j, name in enumerate(self.magnitude_names):
+            # (1, M) against (N, M): the gain varies with the setting and is
+            # constant in the coordinate, so it passes through every spatial
+            # derivative as a factor and changes no residual's structure.
+            out[name] = torch.exp(log_s[:, j]).unsqueeze(0) * out[name]
+        return out
+
     def forward(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
         """
         Args:
@@ -364,7 +431,10 @@ class Net(nn.Module):
             beta        = beta.unsqueeze(0)
             H           = gamma * H + beta
 
-        return {name: module(H).squeeze(-1) for name, module in self.outputs.items()}
+        return self._apply_magnitude(
+            {name: module(H).squeeze(-1) for name, module in self.outputs.items()},
+            z_mu,
+        )
 
     def forward_paired(self, X: torch.Tensor, mu: torch.Tensor) -> dict:
         """
@@ -403,12 +473,16 @@ class Net(nn.Module):
             gamma, beta = self.film(z_mu).chunk(2, dim=-1)
             H = gamma.unsqueeze(0) * H + beta.unsqueeze(0)
 
-        return {name: module(H).squeeze(-1) for name, module in self.outputs.items()}
+        return self._apply_magnitude(
+            {name: module(H).squeeze(-1) for name, module in self.outputs.items()},
+            z_mu,
+        )
 
     def __repr__(self) -> str:
         lines = ["Net("]
         lines.append(f"  use_fourier = {self.use_fourier}")
         lines.append(f"  use_film    = {self.use_film}")
+        lines.append(f"  magnitude   = {self.magnitude is not None}")
         lines.append("")
 
         total = 0
@@ -460,6 +534,7 @@ class Net(nn.Module):
         # constant the network used before the field existed, so an old
         # checkpoint reconstructs the architecture it was actually trained with.
         cfg.setdefault("film_layers", 2)
+        cfg.setdefault("magnitude", False)
         # Dropped after measurement: a multiplicative output gain never paid
         # for itself at these amplitudes, and it made u = 0 a fixed point of
         # every gradient, which is how one run reached exactly zero and stayed.
