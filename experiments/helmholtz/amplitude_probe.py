@@ -151,9 +151,22 @@ def main():
     GAIN_MIN = 0.05
 
     third = "pde" if args.hard_bc else "bc"
-    print(f"{'k':>8} {'best s':>7} {'gain':>7} {third + '(1)':>10} "
-          f"{third + '(best)':>10} {'data(1)':>10} {'data(best)':>10}"
-          f"   {'verdict':>12}")
+
+    # The optimum of the sum says where training settles; it does not say who
+    # put it there. Under the hard ansatz the two terms need not agree: the
+    # equation must cancel the source k*G that the harmonic extension leaves
+    # behind, which a larger field does better, while the data term knows the
+    # true amplitude and pulls the other way. Splitting the argument out is the
+    # whole point of the columns below — an equation term that prefers s > 1
+    # where the data prefers s < 1 is the ansatz paying for the overshoot, and
+    # nothing else in the setup would produce that signature.
+    def best_of(rows, group):
+        return min(rows, key=lambda t: t[2].get(group, 0.0))[0]
+
+    print(f"{'k':>8} {'best s':>7} {'gain':>7} "
+          f"{'s(' + third + ')':>9} {'s(data)':>8} "
+          f"{third + '(1)':>10} {third + '(best)':>10} "
+          f"{'data(1)':>10} {'data(best)':>10}   {'verdict':>12}")
     n_up = 0
     for m, rows in sorted(per_setting.items()):
         one = next(r for r in rows if r[0] == 1.0)
@@ -167,10 +180,20 @@ def main():
         else:
             verdict = "content"
         print(f"{ks[m]:>8.3f} {best[0]:>7.2f} {100*gain:>6.1f}% "
+              f"{best_of(rows, third):>9.2f} {best_of(rows, 'data'):>8.2f} "
               f"{one[2].get(third, 0):>10.3e} {best[2].get(third, 0):>10.3e} "
               f"{one[2].get('data', 0):>10.3e} {best[2].get('data', 0):>10.3e}"
               f"   {verdict:>12}")
 
+    split = sum(1 for rows in per_setting.values()
+                if best_of(rows, third) > 1.0 > best_of(rows, "data"))
+    print()
+    if split:
+        print(f"At {split} of {len(ks)} settings the equation prefers a larger "
+              f"field than the data does. Where that happens the amplitude "
+              f"training settles on is a compromise between two terms that "
+              f"disagree, not an estimate of the true one, and the overshoot is "
+              f"the price of cancelling the source the ansatz leaves behind.")
     print()
     if n_up == 0:
         print("No setting would lower the loss by growing. The ceiling is the "

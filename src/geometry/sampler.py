@@ -1,5 +1,6 @@
 import torch
 from dataclasses import dataclass, field
+from typing import Optional
 
 from geometry.geom import *
 
@@ -36,7 +37,7 @@ class SampledPoints:
     """
     interior:   CollocationBatch
     boundaries: dict = field(default_factory=dict)   # str -> BoundaryBatch
-    initial:    CollocationBatch | None = None       # only when has_time=True
+    initial:    Optional[CollocationBatch] = None    # only when has_time=True
 
     def to(self, device) -> "SampledPoints":
         return SampledPoints(

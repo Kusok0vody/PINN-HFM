@@ -1,5 +1,6 @@
 import torch
 import math
+from typing import Optional
 
 
 class Geometry:
@@ -40,7 +41,7 @@ class Geometry:
         boundaries: dict,
         dim: int = 2,
         has_time: bool = False,
-        T: list | None = None,
+        T: Optional[list] = None,
     ):
         self.boundaries  = boundaries
         self.dim         = dim
