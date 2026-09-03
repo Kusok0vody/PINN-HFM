@@ -616,6 +616,14 @@ class PINN(nn.Module):
         # --- BC ---
         res_bc_raw = {}
         for _, batch in self.points.boundaries.items():
+            # A face declared with N = 0 is still a face — it describes the
+            # domain — but it carries no points, and the sampler hands back an
+            # empty batch for it by design. Evaluating a network on zero points
+            # is not a smaller version of evaluating it, it is a reshape of an
+            # empty tensor into an ambiguous shape, and it raises. A face with
+            # nothing on it contributes nothing.
+            if batch.coords.shape[0] == 0:
+                continue
             unpacked, pred_bc = self._evaluate(batch.coords, parameters)
             res_bc_raw.update(self.physics.residualBC(pred_bc, unpacked, batch))
         res_bc = self.physics.apply_boundary_constraints(res_bc_raw)

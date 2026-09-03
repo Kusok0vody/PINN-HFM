@@ -314,3 +314,124 @@ def helmholtz_annulus_resonances(k_min, k_max, r_in, r_out, n_arcs=8,
         found.extend(0.5 * (kk[sign_change] + kk[sign_change + 1]))
 
     return sorted(found)
+
+
+def lotka_volterra(t, y0, par, dt_max=1e-2):
+    """
+    Three-species Lotka-Volterra reference, integrated rather than solved.
+
+    dG/dt = r G (1 - G/K) - alpha G H
+    dH/dt = e1 alpha G H - d1 H - beta H P
+    dP/dt = e2 beta H P - d2 P
+
+    There is no closed form, so this is classical RK4 on a fixed grid, dense
+    enough that the discretisation error sits far below anything a network is
+    going to be judged against, and the result is then read off at the
+    requested times by linear interpolation.
+
+    Fixed step rather than adaptive on purpose. The system is not stiff over
+    the ranges this sweep uses, an adaptive controller would need scipy, which
+    this project does not depend on, and a fixed grid makes the cost the same
+    for every parameter setting — which matters when the caller is a training
+    loop redrawing its batch every hundred steps.
+
+    Every setting is integrated at once: the state is (M, 3) and the whole
+    sweep advances in one loop, so the cost is one integration, not M of them.
+
+    Args:
+        t:      (N,) times to report, any order, all >= 0
+        y0:     (3,) or (M, 3) initial values of G, H, P
+        par:    dict of name -> (M,) arrays, keys r K alpha e1 d1 beta e2 d2
+        dt_max: upper bound on the integration step. Also bounded internally
+                by the fastest rate in par, so the default stays safe across a
+                sweep instead of only at the parameters it was tuned on.
+
+    Returns:
+        (N, M, 3) array, last axis ordered G, H, P
+    """
+    import numpy as np
+
+    keys = ("r", "K", "alpha", "e1", "d1", "beta", "e2", "d2")
+    p = {k: np.asarray(par[k], dtype=np.float64).reshape(-1) for k in keys}
+    m = max(v.size for v in p.values())
+    p = {k: np.broadcast_to(v, (m,)).copy() for k, v in p.items()}
+
+    t = np.asarray(t, dtype=np.float64).reshape(-1)
+    if t.min() < 0:
+        raise ValueError("lotka_volterra reports from t = 0 forward; got "
+                         f"t_min = {t.min()}")
+
+    y0 = np.asarray(y0, dtype=np.float64)
+    y  = np.broadcast_to(y0.reshape(-1, 3) if y0.ndim > 1 else y0.reshape(1, 3),
+                         (m, 3)).copy()
+
+    def rhs(s):
+        G, H, P = s[:, 0], s[:, 1], s[:, 2]
+        return np.stack([
+            p["r"] * G * (1.0 - G / p["K"]) - p["alpha"] * G * H,
+            p["e1"] * p["alpha"] * G * H - p["d1"] * H - p["beta"] * H * P,
+            p["e2"] * p["beta"] * H * P - p["d2"] * P,
+        ], axis=1)
+
+    t_end = float(t.max())
+    if t_end == 0.0:
+        return np.broadcast_to(y, (t.size, m, 3)).copy()
+
+    # Bound the step by the fastest process in the batch, not only by the
+    # caller's number. A default chosen at one set of parameters says nothing
+    # about a sweep that multiplies every rate by three, and the failure would
+    # be silent: an integration that is merely less accurate, reported with the
+    # same confidence. Rates are read off the equations — growth, grazing,
+    # conversion, predation, death — with the populations bounded by K.
+    scale = np.maximum(p["K"], np.abs(y).max(axis=1) if y.size else 1.0)
+    rate  = np.max(np.stack([
+        p["r"], p["d1"], p["d2"],
+        p["alpha"] * scale, p["e1"] * p["alpha"] * scale,
+        p["beta"] * scale, p["e2"] * p["beta"] * scale,
+    ]))
+    # A twentieth of the fastest timescale: comfortably inside RK4's stability
+    # region and well past the point where its truncation error matters.
+    dt_max = min(float(dt_max), 0.05 / max(float(rate), 1e-12))
+
+    n_steps = max(1, int(np.ceil(t_end / dt_max)))
+    dt      = t_end / n_steps
+    grid    = np.linspace(0.0, t_end, n_steps + 1)
+    traj    = np.empty((n_steps + 1, m, 3))
+    slope   = np.empty((n_steps + 1, m, 3))
+    traj[0] = y
+
+    for i in range(n_steps):
+        k1 = rhs(y)
+        k2 = rhs(y + 0.5 * dt * k1)
+        k3 = rhs(y + 0.5 * dt * k2)
+        k4 = rhs(y + dt * k3)
+        slope[i] = k1
+        y = y + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        # The populations are non-negative quantities and the equations keep
+        # them so; only rounding can push one a hair below zero, and left alone
+        # a negative G feeds the logistic term and diverges. Clipping is a
+        # guard against arithmetic, not a correction to the model.
+        np.maximum(y, 0.0, out=y)
+        traj[i + 1] = y
+    slope[n_steps] = rhs(y)
+
+    # Cubic Hermite between grid points, not linear.
+    #
+    # The reported times are wherever the caller's collocation points fell, so
+    # they almost never land on the grid and the interpolation is what the
+    # caller actually receives. Linear would make it the dominant error at
+    # O(dt^2 |y''|) — coarser than the RK4 step that produced the values, which
+    # would be paying for a fourth-order integrator and reading it second
+    # order. The exact slope at every grid point is already in hand, since it
+    # is the right-hand side and k1 is precisely that, so the cubic through
+    # both values and both slopes costs one array of stored k1 and brings the
+    # interpolation to O(dt^4), back in line with the integration.
+    idx = np.clip(np.searchsorted(grid, t, side="right") - 1, 0, n_steps - 1)
+    u   = ((t - grid[idx]) / dt)[:, None, None]
+    u2, u3 = u * u, u * u * u
+    return (
+        (2.0 * u3 - 3.0 * u2 + 1.0) * traj[idx]
+        + (u3 - 2.0 * u2 + u) * dt * slope[idx]
+        + (-2.0 * u3 + 3.0 * u2) * traj[idx + 1]
+        + (u3 - u2) * dt * slope[idx + 1]
+    )
